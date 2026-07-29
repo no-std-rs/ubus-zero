@@ -44,7 +44,7 @@ thiserror = { version = "2", default-features = false }
 spin      = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
 
 [dev-dependencies]
-rstest = { version = "0.23", default-features = false }
+rstest = { version = "0.26", default-features = false }
 rustix = { version = "1.1", default-features = false, features = ["alloc", "fs", "net", "process"] }
 serde_json = "1"
 ubus-testkit = { path = "crates/testkit" }
