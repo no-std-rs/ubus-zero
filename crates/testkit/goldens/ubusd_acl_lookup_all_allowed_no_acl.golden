@@ -1,0 +1,9 @@
+# ubus-golden-format: 1
+# test: ubusd_acl lookup_all_allowed_no_acl
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b bytes 000400030000000000000004
+0 b2c bytes 00010003000000000000000c0100000800000000
+0 c2b eof
+0 b2c eof

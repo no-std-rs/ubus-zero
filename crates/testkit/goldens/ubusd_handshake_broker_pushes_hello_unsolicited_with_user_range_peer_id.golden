@@ -1,0 +1,7 @@
+# ubus-golden-format: 1
+# test: ubusd_handshake broker_pushes_hello_unsolicited_with_user_range_peer_id
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b eof
+0 b2c eof

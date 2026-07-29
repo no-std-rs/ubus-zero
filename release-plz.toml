@@ -1,0 +1,7 @@
+[workspace]
+release = false
+release_always = false
+
+[[package]]
+name = "ubus-zero"
+release = true

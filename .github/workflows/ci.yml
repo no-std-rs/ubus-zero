@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Stable workspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache Cargo data
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build compatibility broker
+        run: cargo build -p ubusd-rs --features testing
+
+      - name: Test workspace
+        run: cargo test --workspace --all-features
+
+      - name: Inspect publishable package
+        run: |
+          test "$(cargo metadata --no-deps --format-version 1 | jq '[.packages[] | select(.publish != [])] | length')" = "1"
+          test "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ubus-zero") | .targets[] | select(.kind == ["lib"]) | .name')" = "ubus"
+          cargo package -p ubus-zero --list
+          cargo package -p ubus-zero
+
+  pinned-openwrt:
+    name: Pinned OpenWrt parity
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      UBUS_ZERO_COMPAT: require
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Cache pinned reference build
+        id: reference-cache
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .dep/bin
+          key: openwrt-${{ runner.os }}-${{ hashFiles('tools/ubusd-builder/Dockerfile') }}
+
+      - name: Set up Docker Buildx
+        if: steps.reference-cache.outputs.cache-hit != 'true'
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build pinned OpenWrt fixtures
+        if: steps.reference-cache.outputs.cache-hit != 'true'
+        run: tools/ubusd-builder/build.sh
+
+      - name: Restore executable bits
+        run: chmod +x .dep/bin/ubusd .dep/bin/ubus .dep/bin/uci .dep/bin/rpcd
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Build compatibility broker
+        run: cargo build -p ubusd-rs --features testing
+
+      - name: Strict workspace suite
+        run: cargo test --workspace --all-features
+
+      - name: Fault-profile parity
+        run: tools/ubus-fault-check.sh
+
+  upstream-drift:
+    name: Upstream drift watch
+    if: github.event_name == 'schedule'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      UBUS_ZERO_COMPAT: require
+      UBUSD_BUILD_ARGS: "--build-arg LIBUBOX_REV=master --build-arg UBUS_REV=master"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build OpenWrt master fixtures
+        run: tools/ubusd-builder/build.sh
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Build compatibility broker
+        run: cargo build -p ubusd-rs --features testing
+
+      - name: Strict matrix against OpenWrt master
+        run: cargo test --all-features --test ubusd_handshake

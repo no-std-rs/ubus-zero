@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned for reproducible CI and release packaging. This is not an MSRV claim;
+# the public crate remains `no_std + alloc` and is tested separately below.
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

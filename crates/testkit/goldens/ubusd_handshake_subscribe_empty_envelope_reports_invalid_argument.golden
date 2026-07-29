@@ -1,0 +1,9 @@
+# ubus-golden-format: 1
+# test: ubusd_handshake subscribe_empty_envelope_reports_invalid_argument
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b bytes 000802c60000000000000004
+0 b2c bytes 000102c6000000000000000c0100000800000002
+0 c2b eof
+0 b2c eof

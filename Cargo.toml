@@ -1,0 +1,61 @@
+[workspace]
+members = [
+    ".",
+    "crates/libubox-sys",
+    "crates/testkit",
+    "crates/ubusd",
+]
+resolver = "2"
+
+[package]
+name = "ubus-zero"
+edition = "2021"
+version = "0.1.0"
+publish = ["crates-io"]
+license = "Apache-2.0"
+description = "Pure-Rust no_std client and object provider for the OpenWrt ubus protocol"
+readme = "README.md"
+repository = "https://github.com/pawelchcki/ubus-zero"
+homepage = "https://github.com/pawelchcki/ubus-zero"
+documentation = "https://docs.rs/ubus-zero"
+keywords = ["openwrt", "ubus", "ipc", "embedded", "no-std"]
+categories = ["embedded", "network-programming", "no-std"]
+include = [
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/assets/ubus-zero.svg",
+    "/src/**",
+    "/tests/round_trip.rs",
+]
+
+[lib]
+name = "ubus"
+path = "src/lib.rs"
+
+[features]
+default = []
+testing = []
+
+[dependencies]
+thiserror = { version = "2", default-features = false }
+spin      = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
+
+[dev-dependencies]
+rstest = { version = "0.23", default-features = false }
+rustix = { version = "1.1", default-features = false, features = ["alloc", "fs", "net", "process"] }
+serde_json = "1"
+ubus-testkit = { path = "crates/testkit" }
+ubusd-rs = { path = "crates/ubusd", features = ["testing"] }
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = "z"
+
+[profile.dev]
+panic = "abort"

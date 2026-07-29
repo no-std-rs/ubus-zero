@@ -1,0 +1,24 @@
+[package]
+name = "ubus-testkit"
+edition = "2021"
+version = "0.1.0"
+publish = false
+license = "Apache-2.0"
+description = "Dev-only fixtures for matrix-driven UBUS transport tests (RawPeer / TransportPair / UbusdHarness)."
+# Plain `cc` (not the `cc` crate) keeps this dep-free for a 50-line shim.
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ubus   = { package = "ubus-zero", path = "../.." }
+rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "fs", "pipe", "process", "time"] }
+paste = "1"
+
+# `libubox-sys` is Linux-only (libubox/libubus only build on Linux)
+# and silent-skips inside its own build.rs when `.dep/bin/` artifacts
+# aren't reachable. The dep itself is unconditional under cfg(linux)
+# so `cargo check --workspace` always exercises it.
+[target.'cfg(target_os = "linux")'.dependencies]
+libubox-sys = { path = "../libubox-sys" }

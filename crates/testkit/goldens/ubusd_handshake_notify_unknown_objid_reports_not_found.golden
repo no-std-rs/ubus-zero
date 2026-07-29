@@ -1,0 +1,9 @@
+# ubus-golden-format: 1
+# test: ubusd_handshake notify_unknown_objid_reports_not_found
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b bytes 000a02e4000000000000001803000008000000020400000a6576656e74000000
+0 b2c bytes 000102e4000000000000000c0100000800000004
+0 c2b eof
+0 b2c eof

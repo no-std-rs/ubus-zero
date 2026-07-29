@@ -1,0 +1,12 @@
+# ubus-golden-format: 1
+# test: ubusd_handshake redundant_client_hello_replies_with_invalid_command_status
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b bytes 0000000b0000000100000004
+0 c2b bytes 0003000c0000000100000004
+0 b2c bytes 0001000b000000010000000c0100000800000001
+0 b2c bytes 0002000c0000000100000004
+0 b2c bytes 0001000c000000010000000c0100000800000000
+0 c2b eof
+0 b2c eof

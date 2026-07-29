@@ -1,0 +1,41 @@
+[package]
+name = "ubusd-rs"
+build = "build.rs"
+edition = "2021"
+version = "0.1.0"
+publish = false
+license = "Apache-2.0"
+description = "Pure-Rust ubusd reimplementation used by the ubus-zero compatibility suite."
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# `testing` compiles the in-process write-governor seam (`Config::
+# tx_governor`) that pins the deterministic tx-backpressure shed point
+# for `slow_subscriber_evicted_when_tx_buf_caps`. Zero cost otherwise.
+# Enabled workspace-wide by the `cargo test --workspace --features
+# testing` suite; the smoke tests that use the seam require it.
+testing = []
+
+[[bin]]
+name = "ubusd-rs"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the workspace wire codec / envelope / blob — the broker is a
+# routing shell on top of the same byte format the client/server speak.
+ubus      = { package = "ubus-zero", path = "../.." }
+# `event` for poll(2), `net` for accept/recv/send/bind_unix/listen,
+# `fs` for unlink/chmod. We deliberately do NOT enable `std` here:
+# Cargo's workspace-wide feature unification would otherwise turn
+# rustix-with-std on for the no_std protocol crate too.
+rustix    = { version = "1.1", default-features = false, features = ["alloc", "net", "fs", "event", "process", "time"] }
+log       = { version = "0.4", default-features = false }
+libc      = "0.2"
+serde     = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+thiserror = { version = "2", default-features = false }
+
+[dev-dependencies]
+ubus-testkit = { path = "../testkit" }

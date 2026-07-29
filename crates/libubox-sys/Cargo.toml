@@ -1,0 +1,19 @@
+[package]
+name = "libubox-sys"
+edition = "2021"
+version = "0.1.0"
+publish = false
+license = "Apache-2.0"
+description = "Minimal FFI surface for libubox/libubus, dev-only. Used by ubus-testkit to drive a libubox-built sender against our UbusObject server through upstream ubusd."
+# `links = "ubox"` lets dependent build scripts read DEP_UBOX_* metadata —
+# we use it to propagate "FFI is wired" to ubus-testkit so its
+# LibuboxClient module compiles only when artifacts are present.
+links = "ubox"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# Linux-only: libubox/libubus are Linux-only and the .dep/bin/ artifacts
+# are linux ELFs. On non-Linux hosts the build script silent-skips.
+[target.'cfg(target_os = "linux")'.dependencies]

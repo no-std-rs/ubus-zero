@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="420" viewBox="0 0 1440 420" role="img" aria-labelledby="title desc">
+  <title id="title">ubus-zero</title>
+  <desc id="desc">Pure Rust building blocks for OpenWrt ubus</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#172033"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6ee7b7"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="10" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1440" height="420" rx="28" fill="url(#bg)"/>
+  <g opacity=".16" stroke="#94a3b8">
+    <path d="M0 84h1440M0 168h1440M0 252h1440M0 336h1440"/>
+    <path d="M120 0v420M240 0v420M360 0v420M480 0v420M600 0v420M720 0v420M840 0v420M960 0v420M1080 0v420M1200 0v420M1320 0v420"/>
+  </g>
+  <g transform="translate(98 72)">
+    <circle cx="138" cy="138" r="104" fill="none" stroke="url(#ring)" stroke-width="28" filter="url(#glow)"/>
+    <circle cx="138" cy="138" r="42" fill="#0b1220" stroke="#d7fff2" stroke-width="5"/>
+    <path d="M138 0v34M138 242v34M0 138h34M242 138h34" stroke="#d7fff2" stroke-width="8" stroke-linecap="round"/>
+  </g>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="430" y="204" fill="#f8fafc" font-size="94" font-weight="700" letter-spacing="-5">ubus-zero</text>
+    <text x="436" y="264" fill="#94a3b8" font-size="28" letter-spacing="2">PURE RUST · NO_STD + ALLOC · OPENWRT UBUS</text>
+    <path d="M436 296h760" stroke="url(#ring)" stroke-width="4" stroke-linecap="round"/>
+  </g>
+</svg>

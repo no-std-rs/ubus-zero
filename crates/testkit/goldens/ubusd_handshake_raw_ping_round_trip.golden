@@ -1,0 +1,10 @@
+# ubus-golden-format: 1
+# test: ubusd_handshake raw_ping_round_trip
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b bytes 000300070000000100000004
+0 b2c bytes 000200070000000100000004
+0 b2c bytes 00010007000000010000000c0100000800000000
+0 c2b eof
+0 b2c eof

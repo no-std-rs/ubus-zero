@@ -1,0 +1,9 @@
+# ubus-golden-format: 1
+# test: ubusd_handshake event_object_unknown_method_reports_invalid_command
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c bytes 000000000000000100000004
+0 c2b bytes 000502bcffffffff0000001803000008ffffffff0400000a626f677573000000
+0 b2c bytes 000102bcffffffff0000000c0100000800000001
+0 c2b eof
+0 b2c eof

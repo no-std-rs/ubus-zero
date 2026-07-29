@@ -1,0 +1,6 @@
+# ubus-golden-format: 1
+# test: ubusd_acl unresolvable_uid_client_refused_before_hello
+# ubus-rev: 24864e7
+# libubox-rev: 17f527f
+0 b2c eof
+0 c2b eof
