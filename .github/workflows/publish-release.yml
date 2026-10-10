@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing stable GitHub Release tag to package
+        description: Existing stable release tag (dispatch the workflow at this same tag)
         required: true
         type: string
 
@@ -36,6 +36,8 @@ jobs:
         run: rustup show
       - name: Verify and align the release version
         run: |
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -m unittest discover -s scripts -p '*_test.py'
           python3 scripts/prepare-release.py "$RELEASE_TAG"
           cargo test --locked --workspace --all-features
@@ -48,4 +50,4 @@ jobs:
       - name: Attach packages for Runnerless
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" dist/registry/*.cargo-upload dist/registry/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+        run: python3 scripts/attach-release-assets.py "$RELEASE_TAG" dist/registry

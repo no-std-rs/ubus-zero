@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 def load(name):
@@ -17,6 +18,7 @@ def load(name):
 
 prepare = load("prepare-release")
 uploads = load("package-registry-uploads")
+assets = load("attach-release-assets")
 
 
 class ReleaseIdentityTest(unittest.TestCase):
@@ -67,6 +69,54 @@ class UploadIdentityTest(unittest.TestCase):
         for body in [self.body("ubus-testkit"), self.body(version="0.1.0"), self.body()[:-1], self.body() + b"extra", b"short"]:
             with self.subTest(body=body), self.assertRaises(ValueError):
                 uploads.parse_upload(body, "ubus-zero", "0.2.0")
+
+
+class AssetRetryTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.names = ["ubus-zero-0.2.0.cargo-upload", "SHA256SUMS"]
+        self.contents = [b"package", b"checksums"]
+        for name, data in zip(self.names, self.contents):
+            self.root.joinpath(name).write_bytes(data)
+        self.release = {"tag_name": "ubus-zero-v0.2.0", "draft": False, "prerelease": False, "assets": []}
+
+    def retained(self, index, data=None):
+        data = self.contents[index] if data is None else data
+        return {"id": index + 1, "name": self.names[index], "size": len(data),
+                "digest": "sha256:" + assets.hashlib.sha256(data).hexdigest()}
+
+    def attach(self, responses):
+        with patch.object(assets, "gh", side_effect=responses) as remote:
+            assets.attach("no-std-rs/ubus-zero", "ubus-zero-v0.2.0", self.root)
+        return remote
+
+    def test_partial_upload_resumes_only_missing_checksum(self):
+        self.release["assets"] = [self.retained(0)]
+        remote = self.attach([json.dumps(self.release).encode(), b""])
+        self.assertEqual(remote.call_args_list[-1].args[0], ["release", "upload", "ubus-zero-v0.2.0",
+                         str(self.root / "SHA256SUMS"), "--repo", "no-std-rs/ubus-zero"])
+
+    def test_completed_upload_performs_no_writes(self):
+        self.release["assets"] = [self.retained(0), self.retained(1)]
+        remote = self.attach([json.dumps(self.release).encode()])
+        self.assertEqual(remote.call_count, 1)
+
+    def test_conflicting_checksum_prevents_uploading_missing_package(self):
+        self.release["assets"] = [self.retained(1, b"different")]
+        with patch.object(assets, "gh", return_value=json.dumps(self.release).encode()) as remote:
+            with self.assertRaisesRegex(ValueError, "existing asset differs"):
+                assets.attach("no-std-rs/ubus-zero", "ubus-zero-v0.2.0", self.root)
+        self.assertEqual(remote.call_count, 1)
+
+    def test_missing_digest_downloads_to_verify_without_replacing(self):
+        retained = self.retained(0)
+        retained["digest"] = None
+        self.release["assets"] = [retained, self.retained(1)]
+        remote = self.attach([json.dumps(self.release).encode(), self.contents[0]])
+        self.assertEqual(remote.call_count, 2)
+        self.assertEqual(remote.call_args_list[-1].args[0][:2], ["api", "repos/no-std-rs/ubus-zero/releases/assets/1"])
 
 
 if __name__ == "__main__":

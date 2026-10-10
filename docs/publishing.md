@@ -81,9 +81,18 @@ cargo publish -p ubus-zero --registry crates-io --locked --dry-run
 Extract the generated `.crate` into a clean temporary directory and build it
 independently. Published versions are permanent.
 
-To retry an asset build, dispatch `publish-release.yml` with the existing stable
-release tag. Existing assets are not overwritten; if both assets are already
-present and the publish task is waiting for setup, finish Runnerless setup instead.
+To retry an asset build, dispatch the workflow **at the same tag** being packaged:
+
+```sh
+gh workflow run publish-release.yml --repo no-std-rs/ubus-zero \
+  --ref ubus-zero-v0.1.0 --field tag=ubus-zero-v0.1.0
+```
+
+The job checks that its GitHub revision is the tag's checked-out revision, so
+Runnerless reads the completed build's version even after `main` advances.
+Matching existing assets are verified and skipped; only missing assets are uploaded.
+Different existing bytes cause failure and are never overwritten. If the publish
+task is waiting for setup, finish Runnerless setup instead of rebuilding assets.
 
 No minimum supported Rust version is claimed for `0.1.0`; `rust-version`
 remains unset until a stable compatibility matrix exists.

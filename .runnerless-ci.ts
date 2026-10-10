@@ -27,8 +27,11 @@ export function run(): void {
     || details.get("action").string() != "completed"
     || details.get("workflowPath").string() != ".github/workflows/publish-release.yml"
     || details.get("conclusion").string() != "success") return;
+  const tag = details.get("headRef").string();
+  if (!tag.startsWith("ubus-zero-v")) return;
+  // Runnerless pins "head" to workflow_run.head_sha, not the current main tip.
   const version = repo.readText("version.txt", "head").trim();
-  const tag = "ubus-zero-v" + version;
+  if (tag != "ubus-zero-v" + version) return;
   if (!packages.releasePublished(tag, version)) return;
   packages.crates(new OperationRequest("publish-ubus-zero"),
     new RegistryPublishRequest(tag, version).add("ubus-zero", "ubus-zero-" + version + ".cargo-upload"));
