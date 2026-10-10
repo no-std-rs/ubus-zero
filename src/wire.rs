@@ -3,7 +3,7 @@
 //! attribute (`id=0`, `len=4`) in both directions: libubus emits
 //! the wrapper on the client side, and upstream `ubusd` emits the
 //! same shape back to the client (broker -> client HELLO is also
-//! 8 + 4 = 12 bytes on the wire — see `ubusd-rs::reply::hello_reply`
+//! 8 + 4 = 12 bytes on the wire — see `ubusd::reply::hello_reply`
 //! and the cross-impl matrix that pins the parity). The parser
 //! short-circuits HELLO before reading the body, so the 4 trailing
 //! bytes are simply ignored either way. Typed messages (DATA /

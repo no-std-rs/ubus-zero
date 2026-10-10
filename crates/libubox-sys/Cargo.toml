@@ -4,7 +4,10 @@ edition = "2021"
 version = "0.1.0"
 publish = false
 license = "Apache-2.0"
-description = "Minimal FFI surface for libubox/libubus, dev-only. Used by ubus-testkit to drive a libubox-built sender against our UbusObject server through upstream ubusd."
+description = "Hand-written Linux FFI bindings and C accessors for OpenWrt libubox and libubus"
+repository = "https://github.com/no-std-rs/ubus-zero"
+readme = "README.md"
+include = ["/Cargo.toml", "/README.md", "/LICENSE", "/NOTICE", "/build.rs", "/src/**", "/examples/**"]
 # `links = "ubox"` lets dependent build scripts read DEP_UBOX_* metadata —
 # we use it to propagate "FFI is wired" to ubus-testkit so its
 # LibuboxClient module compiles only when artifacts are present.

@@ -29,11 +29,11 @@ use ubus::wire::{
 use ubus_testkit::FdPeer;
 use ubus_testkit::{pipe, unique_socket_path};
 
-use ubusd_rs::peer::MAX_TX_BUF_BYTES;
-use ubusd_rs::registry::FIRST_PEER_ID;
+use ubusd::peer::MAX_TX_BUF_BYTES;
+use ubusd::registry::FIRST_PEER_ID;
 #[cfg(feature = "testing")]
-use ubusd_rs::WriteGovernor;
-use ubusd_rs::{Broker, Config};
+use ubusd::WriteGovernor;
+use ubusd::{Broker, Config};
 
 /// Wait this long for `Broker::bind` to publish the listening socket.
 const BIND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -57,7 +57,7 @@ fn spawn_broker_with<F>(setup: F) -> (PathBuf, Arc<AtomicBool>, thread::JoinHand
 where
     F: FnOnce(&mut Broker) + Send + 'static,
 {
-    let path = unique_socket_path("ubusd-rs-smoke");
+    let path = unique_socket_path("ubusd-smoke");
     #[allow(unused_mut)]
     let mut cfg = Config {
         socket_path: path.to_str().unwrap().into(),
@@ -107,7 +107,7 @@ where
 fn spawn_broker_governed(
     governor: WriteGovernor,
 ) -> (PathBuf, Arc<AtomicBool>, thread::JoinHandle<()>) {
-    let path = unique_socket_path("ubusd-rs-smoke");
+    let path = unique_socket_path("ubusd-smoke");
     let cfg = Config {
         socket_path: path.to_str().unwrap().into(),
         tx_governor: Some(governor),
@@ -136,7 +136,7 @@ fn spawn_broker_governed(
 
 #[cfg(feature = "testing")]
 fn spawn_broker_with_uid(uid: u32) -> (PathBuf, Arc<AtomicBool>, thread::JoinHandle<()>) {
-    let path = unique_socket_path("ubusd-rs-monitor");
+    let path = unique_socket_path("ubusd-monitor");
     let cfg = Config {
         socket_path: path.to_str().unwrap().into(),
         peer_uid_override: Some(uid),
@@ -167,7 +167,7 @@ fn shutdown(stop: Arc<AtomicBool>, h: thread::JoinHandle<()>) {
 
 #[test]
 fn wake_pipe_shutdown_tag_makes_run_return() {
-    let path = unique_socket_path("ubusd-rs-wake");
+    let path = unique_socket_path("ubusd-wake");
     let cfg = Config {
         socket_path: path.to_str().expect("utf-8 socket path").into(),
         ..Default::default()

@@ -20,6 +20,11 @@ pub mod server;
 pub mod transport;
 pub mod wire;
 
+#[cfg(feature = "json")]
+pub mod json;
+#[cfg(all(feature = "unix", target_os = "linux"))]
+pub mod unix;
+
 pub use blobmsg::{BlobBuilder, BlobIter, BlobMsgTable, BlobRef, BlobType, BlobValue};
 pub use error::UbusError;
 pub use msg::{InboundMsg, OutboundMsg};

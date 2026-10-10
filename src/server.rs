@@ -203,6 +203,35 @@ impl<T: Transport> UbusConnection<T> {
             .send(&OutboundMsg::RemoveObject { obj_id }.into_frame(seq))
     }
 
+    /// Remove this object and wait for the broker's acknowledgement before
+    /// closing the transport. This also lets it consume preceding replies.
+    pub fn unregister_and_wait(&mut self) -> Result<(), UbusError> {
+        let obj_id = ObjId::new(self.object_id).ok_or(UbusError::NotRegistered)?;
+        let seq = self.next_seq();
+        self.transport
+            .send(&OutboundMsg::RemoveObject { obj_id }.into_frame(seq))?;
+        let mut idle_waits = 0;
+        loop {
+            let Some(frame) = self.transport.recv()? else {
+                idle_waits += 1;
+                if idle_waits > IDLE_WAIT_BUDGET {
+                    return Err(UbusError::Timeout("remove_object"));
+                }
+                self.transport.wait_recv();
+                continue;
+            };
+            if frame.hdr.seq != seq || frame.hdr.ty != crate::wire::MsgType::Status {
+                continue;
+            }
+            let status = crate::envelope::read_status(&frame.payload)?;
+            if status != 0 {
+                return Err(UbusError::Status(status));
+            }
+            self.object_id = 0;
+            return Ok(());
+        }
+    }
+
     /// Process at most one queued frame. Returns a [`DispatchOutcome`]
     /// describing what happened — callers should record `HandlerErr` /
     /// `Malformed` via injected telemetry if they care to surface
@@ -369,6 +398,27 @@ fn validate_data_args(blobmsg_contents: &[u8]) -> Result<&[u8], UbusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acknowledged_removal_marks_the_object_unregistered() {
+        let (transport, mut peer) = crate::transport::MockTransport::pair();
+        let mut server = UbusConnection::with_object_id(transport, UbusObject::new("example"), 7);
+        let mut envelope = crate::envelope::EnvBuilder::new();
+        envelope.push_i32(crate::envelope::UbusAttr::Status, 0);
+        peer.send(&crate::wire::Frame::to_peer(
+            crate::wire::MsgType::Status,
+            server.seq,
+            0,
+            envelope.finish(),
+        ))
+        .unwrap();
+        server.unregister_and_wait().unwrap();
+        assert_eq!(server.object_id(), 0);
+        assert!(matches!(
+            server.unregister_and_wait(),
+            Err(UbusError::NotRegistered)
+        ));
+    }
     use crate::blobmsg::lookup;
     use crate::envelope::{find, EnvBuilder, UbusAttr};
     use crate::transport::MockTransport;

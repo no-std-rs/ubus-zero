@@ -1,100 +1,99 @@
-# Publishing `ubus-zero`
+# Publishing
 
-Only the root `ubus-zero` package is public. `ubusd-rs`, `ubus-testkit`, and
-`libubox-sys` are compatibility infrastructure and have `publish = false`.
+Runnerless's embedded `workflow().releasePlease()` manages release PRs, tags and
+GitHub Releases. Its package publisher sends verified release assets to crates.io.
+GitHub Actions builds/tests those assets without receiving registry credentials.
 
-| Field | Value |
-| --- | --- |
-| crates.io package | `ubus-zero` |
-| Rust library target | `ubus` |
-| GitHub repository | `no-std-rs/ubus-zero` |
-| Version source | [`version.txt`](../version.txt) |
-| Release tag | `ubus-zero-vMAJOR.MINOR.PATCH` |
-| Asset build workflow | [`publish-release.yml`](../.github/workflows/publish-release.yml) |
-| Registry publisher | Runnerless, enabled Production environment |
+| Package | Purpose | Publishing order |
+| --- | --- | --- |
+| `ubus-zero` (library `ubus`) | Default `no_std + alloc` protocol; optional JSON and Linux Unix transport | 1 |
+| `ubusd` | Linux daemon and embeddable broker | 2 |
+| `ubus-client` | Installable Linux CLI-only crate | 3 |
 
-Versions are independent from Cellctl and every other “Zero” library.
+These packages share [version.txt](../version.txt), release tags of the form
+`ubus-zero-vMAJOR.MINOR.PATCH`, and a single release. Versions are independent of
+Cellctl. [release_packages.py](../scripts/release_packages.py) lists the public
+packages; CI checks that Cargo and the Runnerless request agree.
 
-## Automated releases
+`ubus-testkit` remains private. The local `crates/libubox-sys` compatibility shim
+also remains private while its consolidation is decided: the existing public
+[libubox-sys](https://crates.io/crates/libubox-sys) at 0.2.0 comes from
+[pawelchcki/libubox](https://github.com/pawelchcki/libubox) and has a broader API.
+Publishing this shim as that package requires preserving its API and choosing
+a new version.
 
-The trusted default-branch [Runnerless program](../.runnerless-ci.ts) calls
-`releasePlease()` using the policy in [`.ci-toolkit.yml`](../.ci-toolkit.yml).
-Runnerless proposes version and changelog updates in a release PR. Merging that
-PR creates its tag and GitHub Release through the installed GitHub App.
+## Embedded release-please workflow
 
-The release event starts a credentialless GitHub Actions build. It aligns only
-the root Cargo manifest and lockfile entry with `version.txt`, tests the workspace,
-and verifies `cargo package`. Cargo then sends its exact registry upload body to
-the explicitly allowed `runnerless-capture` loopback registry; that local server
-never forwards uploads. The private crates remain unpublishable. The job attaches
-`ubus-zero-VERSION.cargo-upload` and `SHA256SUMS` to the GitHub Release.
+The default-branch [Runnerless program](../.runnerless-ci.ts) uses
+[.ci-toolkit.yml](../.ci-toolkit.yml) to propose version/changelog changes in a
+release PR. Merging the release PR creates its tag and release through the App.
 
-Runnerless submits `packages.crates` only after the matching asset workflow
-completes successfully and the stable GitHub Release exists. The host checks the
-release revision, default-branch ancestry, checksums, package identity and Cargo
-archive before publishing. It reconciles crates.io's index checksum on retries,
-so an already published matching version succeeds without another upload.
+The release event starts [the asset build](../.github/workflows/publish-release.yml).
+It checks that the event revision and checkout match the tag, validates the
+release tooling, aligns public manifests, their internal dependency requirements
+and lock entries with version.txt, and tests the workspace. Private package
+versions stay unchanged.
 
-Release planning and registry publication use the existing Runnerless service.
-GitHub runners build the package assets and run tests; they receive no crates.io
-credentials and do not perform registry publication.
+Cargo packages and verifies each public crate in dependency order against the
+`runnerless-capture` loopback registry. Its index mirrors crates.io and makes
+captured packages available to subsequent package builds. Each crate builds from
+its distributable archive, including the daemon/CLI's packaged library dependency.
+The server never forwards a publish request.
 
-## Runnerless enrollment
+The job attaches `ubus-zero-VERSION.cargo-upload`, `ubusd-VERSION.cargo-upload`,
+`ubus-client-VERSION.cargo-upload`, and `SHA256SUMS` to the release. These are exact
+Cargo upload bodies containing metadata and the crate archive.
 
-In [Runnerless](https://app.runnerlesshq.com), connect `no-std-rs/ubus-zero` in
-the organization that owns the installed GitHub account. The GitHub App must
-have access to this repository, and `no-std-rs` must be bound to that organization.
+Runnerless submits `packages.crates` after the matching workflow succeeds and
+its stable release exists. It verifies the revision, ancestry, checksums and
+package identities. On retry it reconciles registry checksums instead of
+replacing published versions. Release planning and publication stay in Runnerless.
 
-In the repository's Package publishing panel:
+## Runnerless destination
 
-1. Add a crates.io destination allowing only `ubus-zero`, with tag prefix
-   `ubus-zero-v`.
-2. Use **Set up publishing** to store a dedicated crates.io token in Runnerless's
-   encrypted Production vault. Enter it in the password field, never in GitHub,
-   repository files, logs, or chat.
-3. Scope the token to `ubus-zero`, with `publish-update` and `publish-new` for the
-   first release, and set an expiration. Enable Production when prompted.
+Connect `no-std-rs/ubus-zero` in [Runnerless](https://app.runnerlesshq.com), using
+the organization bound to the installed `no-std-rs` GitHub account. In Package
+publishing:
 
-Missing adoption, destination, credentials or enabled Production leaves the
-publish task waiting; completing setup allows it to resume automatically.
-No infrastructure allowlist PR, Worker secret, or new cloud resource is needed.
+1. Allow `ubus-zero`, `ubusd`, and `ubus-client` with tag prefix `ubus-zero-v`.
+2. Use **Set up publishing** to enter the crates.io token in Runnerless's encrypted
+   Production vault. Keep it out of GitHub, repository files, logs and chat.
+3. Give it permission to create/update these packages, set an expiration, and
+   enable Production.
 
-The former release-plz workflow has been removed. If an external trusted
-publisher was previously configured on crates.io, retire it before switching
-this destination to Runnerless token publishing.
+Missing adoption, destination, credentials or enabled Production leaves the task
+waiting until setup is completed. Existing libubox-sys publishing stays with its
+current repository pending consolidation.
 
-## Initial release and retries
+## History and retries
 
-For the first release, create the stable `ubus-zero-v0.1.0` GitHub Release at the
-validated main commit containing this program and build workflow. This anchors
-Runnerless's subsequent release planning and starts the asset job. The same
-Runnerless publishing path handles both new packages and later versions.
+The existing `ubus-zero-v0.1.0` release contains only the library. Its immutable
+assets remain valid. The program reads package selection from the completed
+workflow's revision so that initial release can still be retried. Subsequent
+embedded release-please releases include all three public workspace packages.
 
-Inspect the initial package before creating the release:
-
-```sh
-cargo package -p ubus-zero --locked --list
-cargo package -p ubus-zero --locked
-cargo publish -p ubus-zero --registry crates-io --locked --dry-run
-```
-
-Extract the generated `.crate` into a clean temporary directory and build it
-independently. Published versions are permanent.
-
-To retry an asset build, dispatch the workflow **at the same tag** being packaged:
+Dispatch asset retries **at the same tag** being packaged:
 
 ```sh
 gh workflow run publish-release.yml --repo no-std-rs/ubus-zero \
-  --ref ubus-zero-v0.1.0 --field tag=ubus-zero-v0.1.0
+  --ref ubus-zero-vVERSION --field tag=ubus-zero-vVERSION
 ```
 
-The job checks that its GitHub revision is the tag's checked-out revision, so
-Runnerless reads the completed build's version even after `main` advances.
-Matching existing assets are verified and skipped; only missing assets are uploaded.
-Different existing bytes cause failure and are never overwritten. If the publish
-task is waiting for setup, finish Runnerless setup instead of rebuilding assets.
+Matching existing assets are verified/skipped; only missing assets are uploaded.
+Different existing bytes cause failure. When publication is waiting for setup,
+finish setup instead of rebuilding assets.
 
-No minimum supported Rust version is claimed for `0.1.0`; `rust-version`
-remains unset until a stable compatibility matrix exists.
+Inspect packages without publishing to crates.io:
+
+```sh
+python3 scripts/check-public-packages.py
+python3 -m unittest discover -s scripts -p '*_test.py'
+python3 scripts/package-registry-uploads.py dist/registry
+(cd dist/registry && sha256sum --check SHA256SUMS)
+```
+
+The capture needs network reads of crates.io dependencies. Actual publication
+happens in Runnerless. No minimum supported Rust version is claimed until a
+stable compatibility matrix exists.
 
 See the [Cargo publishing reference](https://doc.rust-lang.org/cargo/reference/publishing.html).

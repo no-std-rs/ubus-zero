@@ -4,6 +4,7 @@ members = [
     "crates/libubox-sys",
     "crates/testkit",
     "crates/ubusd",
+    "crates/ubus-client",
 ]
 resolver = "2"
 
@@ -28,6 +29,7 @@ include = [
     "/LICENSE",
     "/NOTICE",
     "/assets/ubus-zero.svg",
+    "/docs/cellctl-imports.md",
     "/src/**",
     "/tests/round_trip.rs",
 ]
@@ -39,17 +41,23 @@ path = "src/lib.rs"
 [features]
 default = []
 testing = []
+json = ["dep:serde_json"]
+unix = ["dep:rustix"]
 
 [dependencies]
 thiserror = { version = "2", default-features = false }
 spin      = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "event", "time"], optional = true }
 
 [dev-dependencies]
 rstest = { version = "0.27", default-features = false }
 rustix = { version = "1.1", default-features = false, features = ["alloc", "fs", "net", "process"] }
 serde_json = "1"
 ubus-testkit = { path = "crates/testkit" }
-ubusd-rs = { path = "crates/ubusd", features = ["testing"] }
+ubusd = { path = "crates/ubusd", features = ["testing"] }
 
 [profile.release]
 panic = "abort"

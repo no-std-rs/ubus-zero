@@ -2,3 +2,7 @@ ubus-zero
 Copyright 2026 ubus-zero contributors
 
 This product includes software developed by the ubus-zero contributors.
+
+JSON/blobmsg conversion and the Linux Unix-socket transport include adaptations
+of Cellctl (https://github.com/pawelchcki/cellctl-internal), licensed under the
+Apache License, Version 2.0. See docs/cellctl-imports.md for their provenance.

@@ -1,11 +1,14 @@
 [package]
-name = "ubusd-rs"
+name = "ubusd"
 build = "build.rs"
 edition = "2021"
 version = "0.1.0"
-publish = false
+publish = ["crates-io", "runnerless-capture"]
 license = "Apache-2.0"
-description = "Pure-Rust ubusd reimplementation used by the ubus-zero compatibility suite."
+description = "Pure-Rust OpenWrt ubus broker, available as a daemon and embeddable library"
+repository = "https://github.com/no-std-rs/ubus-zero"
+readme = "README.md"
+include = ["/Cargo.toml", "/README.md", "/LICENSE", "/NOTICE", "/build.rs", "/src/**"]
 
 [lib]
 path = "src/lib.rs"
@@ -19,13 +22,13 @@ path = "src/lib.rs"
 testing = []
 
 [[bin]]
-name = "ubusd-rs"
+name = "ubusd"
 path = "src/main.rs"
 
 [dependencies]
 # Reuse the workspace wire codec / envelope / blob — the broker is a
 # routing shell on top of the same byte format the client/server speak.
-ubus      = { package = "ubus-zero", path = "../.." }
+ubus      = { package = "ubus-zero", path = "../..", version = "0.1.0" }
 # `event` for poll(2), `net` for accept/recv/send/bind_unix/listen,
 # `fs` for unlink/chmod. We deliberately do NOT enable `std` here:
 # Cargo's workspace-wide feature unification would otherwise turn

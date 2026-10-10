@@ -508,7 +508,7 @@ impl LocateEnv for StdEnv {
         std::env::var_os("CARGO_BIN_FILE_UBUSD_RS")
     }
     fn cargo_bin_exe_ubusd_rs(&self) -> Option<std::ffi::OsString> {
-        std::env::var_os("CARGO_BIN_EXE_ubusd-rs")
+        std::env::var_os("CARGO_BIN_EXE_ubusd")
     }
     fn manifest_dir(&self) -> Option<std::ffi::OsString> {
         // `env!` (not `var_os`): pin the value into the binary so
@@ -587,24 +587,17 @@ pub(crate) fn locate_ubusd_rs_with<E: LocateEnv>(env: &E) -> Option<std::ffi::Os
     }
     if let Some(manifest) = env.manifest_dir() {
         for relative in [
-            "../target/debug/ubusd-rs",
-            "../target/release/ubusd-rs",
-            "../../target/debug/ubusd-rs",
-            "../../target/release/ubusd-rs",
-            "target/debug/ubusd-rs",
-            "target/release/ubusd-rs",
+            "../target/debug/ubusd",
+            "../target/release/ubusd",
+            "../../target/debug/ubusd",
+            "../../target/release/ubusd",
+            "target/debug/ubusd",
+            "target/release/ubusd",
         ] {
             let candidate = std::path::Path::new(&manifest).join(relative);
             if env.is_file(&candidate) {
                 return Some(candidate.into_os_string());
             }
-        }
-    }
-    let path = env.path()?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("ubusd-rs");
-        if env.is_file(&candidate) {
-            return Some(candidate.into_os_string());
         }
     }
     None
@@ -765,13 +758,13 @@ mod tests {
         let e = env_rs(
             Some("/explicit/ubusd-rs"),
             Some("/cargo/artifacts/ubusd-rs"),
-            Some("/cargo/target/debug/ubusd-rs"),
+            Some("/cargo/target/debug/ubusd"),
             None,
             None,
             &[
                 "/explicit/ubusd-rs",
                 "/cargo/artifacts/ubusd-rs",
-                "/cargo/target/debug/ubusd-rs",
+                "/cargo/target/debug/ubusd",
             ],
         );
         assert_eq!(
@@ -785,13 +778,13 @@ mod tests {
         let e = env_rs(
             None,
             Some("/cargo/artifacts/ubusd-rs"),
-            Some("/cargo/target/debug/ubusd-rs"),
+            Some("/cargo/target/debug/ubusd"),
             Some("/repo/crates/testkit"),
             None,
             &[
                 "/cargo/artifacts/ubusd-rs",
-                "/cargo/target/debug/ubusd-rs",
-                "/repo/crates/testkit/../../target/debug/ubusd-rs",
+                "/cargo/target/debug/ubusd",
+                "/repo/crates/testkit/../../target/debug/ubusd",
             ],
         );
         assert_eq!(
@@ -805,14 +798,14 @@ mod tests {
         let e = env_rs(
             None,
             None,
-            Some("/cargo/target/debug/ubusd-rs"),
+            Some("/cargo/target/debug/ubusd"),
             None,
             None,
-            &["/cargo/target/debug/ubusd-rs"],
+            &["/cargo/target/debug/ubusd"],
         );
         assert_eq!(
             locate_ubusd_rs_with(&e),
-            Some(OsString::from("/cargo/target/debug/ubusd-rs"))
+            Some(OsString::from("/cargo/target/debug/ubusd"))
         );
     }
 
@@ -824,12 +817,12 @@ mod tests {
             None,
             Some("/repo/crates/testkit"),
             None,
-            &["/repo/crates/testkit/../../target/debug/ubusd-rs"],
+            &["/repo/crates/testkit/../../target/debug/ubusd"],
         );
         assert_eq!(
             locate_ubusd_rs_with(&e),
             Some(OsString::from(
-                "/repo/crates/testkit/../../target/debug/ubusd-rs"
+                "/repo/crates/testkit/../../target/debug/ubusd"
             ))
         );
     }

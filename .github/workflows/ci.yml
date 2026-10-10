@@ -48,17 +48,17 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build compatibility broker
-        run: cargo build -p ubusd-rs --features testing
+        run: cargo build -p ubusd --features testing
 
       - name: Test workspace
         run: cargo test --workspace --all-features
 
-      - name: Inspect publishable package
+      - name: Inspect publishable packages
         run: |
-          test "$(cargo metadata --no-deps --format-version 1 | jq '[.packages[] | select(.publish != [])] | length')" = "1"
+          python3 scripts/check-public-packages.py
           test "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ubus-zero") | .targets[] | select(.kind == ["lib"]) | .name')" = "ubus"
           cargo package -p ubus-zero --list
-          cargo package -p ubus-zero
+          python3 scripts/package-registry-uploads.py dist/registry
 
   pinned-openwrt:
     name: Pinned OpenWrt parity
@@ -94,7 +94,7 @@ jobs:
         run: rustup show
 
       - name: Build compatibility broker
-        run: cargo build -p ubusd-rs --features testing
+        run: cargo build -p ubusd --features testing
 
       - name: Strict workspace suite
         run: cargo test --workspace --all-features
@@ -126,7 +126,7 @@ jobs:
         run: rustup show
 
       - name: Build compatibility broker
-        run: cargo build -p ubusd-rs --features testing
+        run: cargo build -p ubusd --features testing
 
       - name: Strict matrix against OpenWrt master
         run: cargo test --all-features --test ubusd_handshake

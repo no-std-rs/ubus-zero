@@ -33,6 +33,13 @@ export function run(): void {
   const version = repo.readText("version.txt", "head").trim();
   if (tag != "ubus-zero-v" + version) return;
   if (!packages.releasePublished(tag, version)) return;
-  packages.crates(new OperationRequest("publish-ubus-zero"),
-    new RegistryPublishRequest(tag, version).add("ubus-zero", "ubus-zero-" + version + ".cargo-upload"));
+  const request = new RegistryPublishRequest(tag, version)
+    .add("ubus-zero", "ubus-zero-" + version + ".cargo-upload");
+  // Keep retries of the initial library-only release valid. Package selection
+  // comes from the completed workflow's immutable revision.
+  if (repo.readText("crates/ubusd/Cargo.toml", "head").includes('name = "ubusd"')) {
+    request.add("ubusd", "ubusd-" + version + ".cargo-upload")
+      .add("ubus-client", "ubus-client-" + version + ".cargo-upload");
+  }
+  packages.crates(new OperationRequest("publish-ubus-zero"), request);
 }

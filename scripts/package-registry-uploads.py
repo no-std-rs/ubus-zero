@@ -19,10 +19,10 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from release_packages import PACKAGES
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ("ubus-zero",)
 MAX_UPLOAD = 32 * 1024 * 1024
 MAX_INDEX = 4 * 1024 * 1024
 
@@ -52,7 +52,8 @@ def parse_upload(body, expected_name, version):
     archive = body[8 + metadata_size :]
     dependencies = [
         {
-            "name": item["name"],
+            "name": item.get("explicit_name_in_toml") or item["name"],
+            "package": item["name"] if item.get("explicit_name_in_toml") else None,
             "req": item["version_req"],
             "features": item["features"],
             "optional": item["optional"],
@@ -92,10 +93,31 @@ class RegistryHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/index/config.json":
             data = json.dumps(
                 {
-                    "dl": "https://static.crates.io/crates",
+                    "dl": f"http://127.0.0.1:{self.server.server_port}/crates",
                     "api": f"http://127.0.0.1:{self.server.server_port}",
                 }
             ).encode()
+        elif self.path.startswith("/crates/"):
+            parts = self.path.split("/")
+            if len(parts) != 5 or parts[4] != "download":
+                self.send_error(404)
+                return
+            name, version = parts[2:4]
+            asset = self.server.output / f"{name}-{version}.cargo-upload"
+            if name in PACKAGES and version == self.server.version and asset.is_file():
+                body = asset.read_bytes()
+                offset = 8 + struct.unpack_from("<I", body)[0]
+                data = body[offset:]
+            else:
+                try:
+                    with urllib.request.urlopen(f"https://static.crates.io/crates/{name}/{name}-{version}.crate", timeout=20) as response:
+                        data = response.read(MAX_UPLOAD + 1)
+                except (OSError, TimeoutError):
+                    self.send_error(503)
+                    return
+                if len(data) > MAX_UPLOAD:
+                    self.send_error(413)
+                    return
         elif self.path.startswith("/index/"):
             item = self.path.removeprefix("/index/")
             data = self.server.index.get(item)
@@ -177,7 +199,7 @@ def main():
                 "cargo",
                 "--config", 'source.crates-io.replace-with="local-mirror"',
                 "--config", f'source.local-mirror.registry="{index}"',
-                "publish", "--registry", "runnerless-capture", "--allow-dirty", "--no-verify", "--locked",
+                "publish", "--registry", "runnerless-capture", "--allow-dirty", "--locked",
                 "-p", name,
             ]
             result = subprocess.run(command, cwd=ROOT, env=environment, timeout=120, check=False)

@@ -5,8 +5,7 @@
 
 #[cfg(have_libubox)]
 fn main() {
-    use core::ffi::CStr;
-    let path = CStr::from_bytes_with_nul(b"/dev/null\0").unwrap();
+    let path = c"/dev/null";
     let ctx = unsafe { libubox_sys::ubus_connect(path.as_ptr()) };
     println!("ubus_connect('/dev/null') -> {ctx:p}");
     if !ctx.is_null() {

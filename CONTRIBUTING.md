@@ -21,7 +21,7 @@ rustup show
 cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build -p ubusd-rs --features testing
+cargo build -p ubusd --features testing
 cargo test --workspace --all-features
 cargo package -p ubus-zero
 ```
