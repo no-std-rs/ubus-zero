@@ -1,0 +1,53 @@
+name: Prepare release for Runnerless
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable release tag (dispatch the workflow at this same tag)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  crate:
+    name: Prepare ubus-zero for Runnerless
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Verify and align the release version
+        run: |
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -m unittest discover -s scripts -p '*_test.py'
+          python3 scripts/prepare-release.py "$RELEASE_TAG"
+          cargo test --locked --workspace --all-features
+          cargo package -p ubus-zero --locked --allow-dirty
+      - name: Capture the Cargo upload against a local registry
+        run: |
+          python3 scripts/package-registry-uploads.py dist/registry
+          cd dist/registry
+          sha256sum --check SHA256SUMS
+      - name: Attach packages for Runnerless
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/attach-release-assets.py "$RELEASE_TAG" dist/registry

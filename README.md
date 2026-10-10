@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/pawelchcki/ubus-zero/main/assets/ubus-zero.svg" width="720" alt="ubus-zero — pure Rust building blocks for OpenWrt ubus">
+  <img src="https://raw.githubusercontent.com/no-std-rs/ubus-zero/main/assets/ubus-zero.svg" width="720" alt="ubus-zero — pure Rust building blocks for OpenWrt ubus">
 </p>
 
 <p align="center">
-  <a href="https://github.com/pawelchcki/ubus-zero/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/pawelchcki/ubus-zero/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/no-std-rs/ubus-zero/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/no-std-rs/ubus-zero/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://crates.io/crates/ubus-zero"><img alt="crates.io" src="https://img.shields.io/crates/v/ubus-zero.svg"></a>
   <a href="https://docs.rs/ubus-zero"><img alt="docs.rs" src="https://img.shields.io/docsrs/ubus-zero"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
@@ -117,7 +117,7 @@ scheduling, and their concrete transport.
 The project is pre-1.0. Minor versions may refine public APIs, but wire
 compatibility is guarded by canonical transcripts, checked-in goldens, fault
 injection, and cross-broker tests. The full test doctrine lives in
-[Compatibility testing](https://github.com/pawelchcki/ubus-zero/blob/main/docs/compatibility.md).
+[Compatibility testing](https://github.com/no-std-rs/ubus-zero/blob/main/docs/compatibility.md).
 
 ## Repository
 
@@ -149,17 +149,17 @@ tools/ubusd-builder/build.sh
 UBUS_ZERO_COMPAT=require cargo test --workspace --all-features
 ```
 
-See the [contributing guide](https://github.com/pawelchcki/ubus-zero/blob/main/CONTRIBUTING.md)
+See the [contributing guide](https://github.com/no-std-rs/ubus-zero/blob/main/CONTRIBUTING.md)
 for the complete development flow.
 
 ## Security and releases
 
-Releases after the initial crates.io bootstrap use GitHub OIDC trusted
-publishing through a reviewer-protected `crates-io` environment. The repository
-stores no crates.io token. See the [security policy](https://github.com/pawelchcki/ubus-zero/blob/main/SECURITY.md)
-for vulnerability reporting and [publishing guide](https://github.com/pawelchcki/ubus-zero/blob/main/docs/publishing.md)
+Runnerless manages release PRs and publishes verified release assets to crates.io.
+A credentialless GitHub Actions job prepares the packages; registry credentials
+stay in Runnerless's encrypted Production vault. See the [security policy](https://github.com/no-std-rs/ubus-zero/blob/main/SECURITY.md)
+for vulnerability reporting and [publishing guide](https://github.com/no-std-rs/ubus-zero/blob/main/docs/publishing.md)
 for the release controls.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](https://github.com/pawelchcki/ubus-zero/blob/main/LICENSE).
+Licensed under the [Apache License, Version 2.0](https://github.com/no-std-rs/ubus-zero/blob/main/LICENSE).

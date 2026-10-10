@@ -38,6 +38,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: Release preparation tests
+        run: python3 -m unittest discover -s scripts -p '*_test.py'
+
       - name: Check
         run: cargo check --workspace --all-targets --all-features
 
