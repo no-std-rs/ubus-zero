@@ -4,6 +4,37 @@ Runnerless's embedded `workflow().releasePlease()` manages release PRs, tags and
 GitHub Releases. Its package publisher sends verified release assets to crates.io.
 GitHub Actions builds/tests those assets without receiving registry credentials.
 
+## Codex review requirement
+
+The [Runnerless program](../.runnerless-ci.ts) evaluates review evidence on PR,
+review, thread, comment and check events. `Runnerless / Codex review` passes when
+Runnerless's shared policy accepts the current head activation: a trusted clean
+Codex verdict, resolved review threads, and no newer unanswered review request.
+The shared policy also recognizes App-generated release PRs and its existing
+maintainer-authorized `codex: bypass-review` label.
+
+Connect the repository in [Runnerless](https://app.runnerlesshq.com) and give the
+Codex connector repository access. In **Repository automation**, enable automatic
+Codex review requests, or request `@codex review` on each new head. Repository
+adoption and review preferences live in the App; no infrastructure allowlist edit
+is needed.
+
+Once this program is on `main`, confirm an open PR reports the production check
+from Runnerless App `4602759`. Then require it on `main`:
+
+```sh
+python3 scripts/enable-codex-gate.py PR_NUMBER --dry-run
+python3 scripts/enable-codex-gate.py PR_NUMBER
+```
+
+The command adds the check to the existing **Protect main** ruleset, pinned to
+its App. It preserves the existing required CI checks, thread resolution, strict
+status policy, merge methods and bypass actors. It refuses an unseen check or an
+unexpected policy. Committing the program alone does not enforce the requirement;
+Runnerless loads PR programs from their trusted base revision.
+
+## Public packages
+
 | Package | Purpose | Publishing order |
 | --- | --- | --- |
 | `ubus-zero` (library `ubus`) | Default `no_std + alloc` protocol; optional JSON and Linux Unix transport | 1 |

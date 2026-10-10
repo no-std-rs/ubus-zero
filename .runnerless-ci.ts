@@ -1,5 +1,5 @@
 import {
-  workflow, configuration, event, repo, packages, checks, jobs,
+  workflow, configuration, event, repo, packages, checks, jobs, reviews,
   OperationRef, OperationRequest, RegistryPublishRequest, WriteResult,
 } from "runnerless/v1";
 
@@ -8,12 +8,27 @@ const program = workflow().releasePlease();
 export function configure(): void {
   program.configure();
   configuration.workflow("crate-publishing", ["workflow_run", "runnerless_completion"]);
+  configuration.workflow("codex-review", [
+    "pull_request", "pull_request_review", "pull_request_review_comment",
+    "pull_request_review_thread", "issue_comment", "check_run",
+  ]);
 }
 
 export function run(): void {
   program.run();
   const details = event.details();
-  if (details.get("event").string() == "runnerless_completion") {
+  const name = details.get("event").string();
+  if (name == "pull_request" || name == "pull_request_review"
+    || name == "pull_request_review_comment" || name == "pull_request_review_thread"
+    || name == "issue_comment" || name == "check_run") {
+    if (details.get("pullNumber").isNull() || details.get("state").string() != "open") return;
+    // The host binds trusted evidence to the current head activation. A stale
+    // verdict, unresolved thread, or newer unanswered request cannot pass.
+    const review = reviews.evaluate();
+    checks.report("Codex review", review.state == "success", review.summary);
+    return;
+  }
+  if (name == "runnerless_completion") {
     const result = jobs.lookup<WriteResult>(new OperationRef<WriteResult>("op:publish-ubus-zero"));
     if (result.ok) {
       const value = result.value;
@@ -23,7 +38,7 @@ export function run(): void {
     }
     return;
   }
-  if (details.get("event").string() != "workflow_run"
+  if (name != "workflow_run"
     || details.get("action").string() != "completed"
     || details.get("workflowPath").string() != ".github/workflows/publish-release.yml"
     || details.get("conclusion").string() != "success") return;

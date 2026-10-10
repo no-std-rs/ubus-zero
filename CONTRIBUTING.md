@@ -46,4 +46,9 @@ under `.dep/`.
 - Never record golden transcripts against unpinned upstream revisions.
 - Do not commit credentials, generated binaries, `.dep/`, or `target/`.
 
+Runnerless reports `Runnerless / Codex review` using its shared current-head
+review policy. Request `@codex review` after pushing changes, address findings,
+and resolve review threads. See the [publishing guide](docs/publishing.md#codex-review-requirement)
+for activating the required check alongside the existing CI checks.
+
 All contributions are licensed under the Apache License, Version 2.0.
