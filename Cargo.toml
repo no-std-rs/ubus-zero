@@ -11,12 +11,13 @@ resolver = "2"
 name = "ubus-zero"
 edition = "2021"
 version = "0.1.0"
-publish = ["crates-io"]
+# The second registry is the credentialless loopback capture used by release builds.
+publish = ["crates-io", "runnerless-capture"]
 license = "Apache-2.0"
 description = "Pure-Rust no_std client and object provider for the OpenWrt ubus protocol"
 readme = "README.md"
-repository = "https://github.com/pawelchcki/ubus-zero"
-homepage = "https://github.com/pawelchcki/ubus-zero"
+repository = "https://github.com/no-std-rs/ubus-zero"
+homepage = "https://github.com/no-std-rs/ubus-zero"
 documentation = "https://docs.rs/ubus-zero"
 keywords = ["openwrt", "ubus", "ipc", "embedded", "no-std"]
 categories = ["embedded", "network-programming", "no-std"]

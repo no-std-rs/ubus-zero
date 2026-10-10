@@ -1,0 +1,12 @@
+api_version: ci-toolkit/v1alpha1
+
+releases:
+  uses: toolkit.release-please@v1
+  with:
+    version_file: version.txt
+    changelog_path: CHANGELOG.md
+    component: ubus-zero
+    include_component_in_tag: true
+    include_v_in_tag: true
+    tag_separator: "-"
+    bump_minor_pre_major: true

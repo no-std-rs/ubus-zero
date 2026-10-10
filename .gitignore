@@ -1,3 +1,5 @@
 /target
 /.dep/
 /Cross.toml
+/dist/
+__pycache__/

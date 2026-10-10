@@ -3,98 +3,89 @@
 Only the root `ubus-zero` package is public. `ubusd-rs`, `ubus-testkit`, and
 `libubox-sys` are compatibility infrastructure and have `publish = false`.
 
-## Release identity
-
 | Field | Value |
 | --- | --- |
 | crates.io package | `ubus-zero` |
 | Rust library target | `ubus` |
-| GitHub repository | `pawelchcki/ubus-zero` |
-| Release workflow | `release-plz.yml` |
-| GitHub environment | `crates-io` |
-| Tag format | release-plz workspace default (`ubus-zero-v0.1.0`) |
+| GitHub repository | `no-std-rs/ubus-zero` |
+| Version source | [`version.txt`](../version.txt) |
+| Release tag | `ubus-zero-vMAJOR.MINOR.PATCH` |
+| Asset build workflow | [`publish-release.yml`](../.github/workflows/publish-release.yml) |
+| Registry publisher | Runnerless, enabled Production environment |
 
 Versions are independent from Cellctl and every other “Zero” library.
 
-## Automated releases after 0.1.0
+## Automated releases
 
-[`release-plz.toml`](../release-plz.toml) disables release management by
-default and opts in only `ubus-zero`. On ordinary pushes to `main`,
-[`release-plz.yml`](../.github/workflows/release-plz.yml) creates or updates a
-release PR. Publishing runs only for a merged `release-plz-*` PR or a manual
-retry dispatched from `main`.
+The trusted default-branch [Runnerless program](../.runnerless-ci.ts) calls
+`releasePlease()` using the policy in [`.ci-toolkit.yml`](../.ci-toolkit.yml).
+Runnerless proposes version and changelog updates in a release PR. Merging that
+PR creates its tag and GitHub Release through the installed GitHub App.
 
-The release job:
+The release event starts a credentialless GitHub Actions build. It aligns only
+the root Cargo manifest and lockfile entry with `version.txt`, tests the workspace,
+and verifies `cargo package`. Cargo then sends its exact registry upload body to
+the explicitly allowed `runnerless-capture` loopback registry; that local server
+never forwards uploads. The private crates remain unpublishable. The job attaches
+`ubus-zero-VERSION.cargo-upload` and `SHA256SUMS` to the GitHub Release.
 
-- has only `contents: write`, `pull-requests: read`, and `id-token: write`;
-- enters the reviewer-protected `crates-io` environment;
-- exchanges GitHub's OIDC identity through release-plz;
-- stores no crates.io token; and
-- publishes, tags, and creates the GitHub release.
+Runnerless submits `packages.crates` only after the matching asset workflow
+completes successfully and the stable GitHub Release exists. The host checks the
+release revision, default-branch ancestry, checksums, package identity and Cargo
+archive before publishing. It reconciles crates.io's index checksum on retries,
+so an already published matching version succeeds without another upload.
 
-The repository workflow-token default stays read-only. The PR job declares
-only the permissions needed to update its release branch and pull request.
-Third-party actions are pinned by full commit SHA.
+Release planning and registry publication use the existing Runnerless service.
+GitHub runners build the package assets and run tests; they receive no crates.io
+credentials and do not perform registry publication.
 
-## Required GitHub controls
+## Runnerless enrollment
 
-The `crates-io` environment must:
+In [Runnerless](https://app.runnerlesshq.com), connect `no-std-rs/ubus-zero` in
+the organization that owns the installed GitHub account. The GitHub App must
+have access to this repository, and `no-std-rs` must be bound to that organization.
 
-1. permit deployments only from `main`;
-2. require review by `pawelchcki`;
-3. allow self-review so a single-maintainer repository cannot deadlock; and
-4. disable administrator bypass.
+In the repository's Package publishing panel:
 
-GitHub Actions may create pull requests, but no crates.io token may exist as a
-repository, environment, or organization secret for this project.
+1. Add a crates.io destination allowing only `ubus-zero`, with tag prefix
+   `ubus-zero-v`.
+2. Use **Set up publishing** to store a dedicated crates.io token in Runnerless's
+   encrypted Production vault. Enter it in the password field, never in GitHub,
+   repository files, logs, or chat.
+3. Scope the token to `ubus-zero`, with `publish-update` and `publish-new` for the
+   first release, and set an expiration. Enable Production when prompted.
 
-## Initial 0.1.0 bootstrap
+Missing adoption, destination, credentials or enabled Production leaves the
+publish task waiting; completing setup allows it to resume automatically.
+No infrastructure allowlist PR, Worker secret, or new cloud resource is needed.
 
-crates.io trusted publishing cannot create a brand-new package. Version `0.1.0`
-therefore needs one temporary local token:
+The former release-plz workflow has been removed. If an external trusted
+publisher was previously configured on crates.io, retire it before switching
+this destination to Runnerless token publishing.
 
-1. Merge the validated repository to a clean public `main` commit.
-2. Reconfirm that `ubus-zero` is unclaimed.
-3. Create a dedicated crates.io token with only new/update publish capability.
-   Keep it local and never copy it into GitHub.
-4. Inspect the exact archive:
+## Initial release and retries
 
-   ```sh
-   cargo package -p ubus-zero --list
-   cargo package -p ubus-zero
-   ```
+For the first release, create the stable `ubus-zero-v0.1.0` GitHub Release at the
+validated main commit containing this program and build workflow. This anchors
+Runnerless's subsequent release planning and starts the asset job. The same
+Runnerless publishing path handles both new packages and later versions.
 
-5. Extract the generated `.crate` into a clean temporary directory and build
-   it independently.
-6. Run the full dry-run:
+Inspect the initial package before creating the release:
 
-   ```sh
-   cargo publish -p ubus-zero --dry-run
-   ```
+```sh
+cargo package -p ubus-zero --locked --list
+cargo package -p ubus-zero --locked
+cargo publish -p ubus-zero --registry crates-io --locked --dry-run
+```
 
-7. Only if every prior check succeeds, publish:
+Extract the generated `.crate` into a clean temporary directory and build it
+independently. Published versions are permanent.
 
-   ```sh
-   cargo publish -p ubus-zero
-   ```
-
-8. Create the `ubus-zero-v0.1.0` GitHub release at the exact published commit.
-9. On crates.io, configure the trusted publisher with these exact values:
-
-   | Field | Value |
-   | --- | --- |
-   | GitHub owner | `pawelchcki` |
-   | Repository | `ubus-zero` |
-   | Workflow | `release-plz.yml` |
-   | Environment | `crates-io` |
-
-10. Enable trusted-publishing-only mode and revoke the bootstrap token.
-
-Published versions are permanent. Never upload until archive inspection,
-independent extraction, and dry-run checks are all green.
+To retry an asset build, dispatch `publish-release.yml` with the existing stable
+release tag. Existing assets are not overwritten; if both assets are already
+present and the publish task is waiting for setup, finish Runnerless setup instead.
 
 No minimum supported Rust version is claimed for `0.1.0`; `rust-version`
 remains unset until a stable compatibility matrix exists.
 
-See the [Cargo publishing reference](https://doc.rust-lang.org/cargo/reference/publishing.html)
-and [release-plz trusted-publishing guide](https://release-plz.dev/docs/github/quickstart).
+See the [Cargo publishing reference](https://doc.rust-lang.org/cargo/reference/publishing.html).
