@@ -21,7 +21,7 @@ rustup show
 cargo fmt --all -- --check
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build -p ubusd-rs --features testing
+cargo build -p ubusd --features testing
 cargo test --workspace --all-features
 cargo package -p ubus-zero
 ```
@@ -45,5 +45,10 @@ under `.dep/`.
   `feat:`, and `docs:` make release intent clear.
 - Never record golden transcripts against unpinned upstream revisions.
 - Do not commit credentials, generated binaries, `.dep/`, or `target/`.
+
+Runnerless reports `Runnerless / Codex review` using its shared current-head
+review policy. Request `@codex review` after pushing changes, address findings,
+and resolve review threads. See the [publishing guide](docs/publishing.md#codex-review-requirement)
+for activating the required check alongside the existing CI checks.
 
 All contributions are licensed under the Apache License, Version 2.0.

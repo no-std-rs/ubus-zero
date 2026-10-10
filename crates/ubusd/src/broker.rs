@@ -190,7 +190,7 @@ impl Broker {
         if let Err(e) = rustix::fs::unlink(config.socket_path.as_str()) {
             if e != Errno::NOENT {
                 log::warn!(
-                    "ubusd-rs: pre-bind unlink {} failed: {}; bind() may now fail",
+                    "ubusd: pre-bind unlink {} failed: {}; bind() may now fail",
                     config.socket_path,
                     io::Error::from_raw_os_error(e.raw_os_error()),
                 );
@@ -205,7 +205,7 @@ impl Broker {
         if let Err(e) = rustix::fs::chmod(config.socket_path.as_str(), to_mode(config.socket_mode))
         {
             log::warn!(
-                "ubusd-rs: chmod {:o} on {} failed: {e:?}; unprivileged peers may be unable to connect",
+                "ubusd: chmod {:o} on {} failed: {e:?}; unprivileged peers may be unable to connect",
                 config.socket_mode,
                 config.socket_path,
             );
@@ -241,7 +241,7 @@ impl Broker {
     /// loop on the read after the last tag byte.
     pub fn set_wake_pipe(&mut self, fd: OwnedFd) {
         if let Err(e) = rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::NONBLOCK) {
-            log::warn!("ubusd-rs: wake pipe O_NONBLOCK failed: {e:?}; leaving pipe unset");
+            log::warn!("ubusd: wake pipe O_NONBLOCK failed: {e:?}; leaving pipe unset");
             return;
         }
         self.wake_pipe = Some(fd);
@@ -292,11 +292,11 @@ impl Broker {
             // is dropped from the poll set instead of panicking.
             self.live_ids_buf.retain(|id| {
                 let Some(peer) = self.peers.get(*id) else {
-                    log::error!("ubusd-rs: peer {id} listed but not in table; skipping poll");
+                    log::error!("ubusd: peer {id} listed but not in table; skipping poll");
                     return false;
                 };
                 let Some(fd) = peer.fd.as_ref() else {
-                    log::error!("ubusd-rs: peer {id} has no fd; skipping poll");
+                    log::error!("ubusd: peer {id} has no fd; skipping poll");
                     return false;
                 };
                 let mut flags = PollFlags::IN;
@@ -336,7 +336,7 @@ impl Broker {
                 // fault (firewall reset, ICMP error). Distinct from
                 // POLLHUP — a clean peer close vs. an L4 abort look
                 // identical in logs otherwise.
-                log::debug!("ubusd-rs: peer {id} POLLERR, closing");
+                log::debug!("ubusd: peer {id} POLLERR, closing");
                 self.pending_close.insert(id);
                 continue;
             }
@@ -379,7 +379,7 @@ impl Broker {
                             b'T' | b'I' => self.shutdown = true,
                             b'H' => self.reload_acls(),
                             unknown => {
-                                log::debug!("ubusd-rs: ignoring unknown wake-pipe tag {unknown:#x}")
+                                log::debug!("ubusd: ignoring unknown wake-pipe tag {unknown:#x}")
                             }
                         }
                     }
@@ -387,7 +387,7 @@ impl Broker {
                 Err(Errno::AGAIN) => return,
                 Err(Errno::INTR) => continue,
                 Err(e) => {
-                    log::warn!("ubusd-rs: wake-pipe read failed: {e:?}");
+                    log::warn!("ubusd: wake-pipe read failed: {e:?}");
                     return;
                 }
             }
@@ -434,7 +434,7 @@ impl Broker {
                         // None-named peer at this upstream revision. Preserve
                         // that encoding for the testing override path and
                         // non-Linux builds.
-                        log::debug!("ubusd-rs: refusing client with unresolvable credentials");
+                        log::debug!("ubusd: refusing client with unresolvable credentials");
                         continue;
                     }
                     #[cfg(target_os = "linux")]
@@ -453,7 +453,7 @@ impl Broker {
                     let uid = peer_uid_override.or(uid);
                     match self.peers.insert(Peer::new(fd, uid, user, group)) {
                         Ok((id, _)) => {
-                            log::debug!("ubusd-rs: accepted peer {id}");
+                            log::debug!("ubusd: accepted peer {id}");
                             // Match upstream `ubusd`: push HELLO unsolicited
                             // at accept time (seq=0, peer=assigned id), so
                             // libubus clients see their id without sending a
@@ -468,7 +468,7 @@ impl Broker {
                             // connection (kernel sees an immediate EOF on the
                             // peer's socket) than to crash and tear down every
                             // other peer too.
-                            log::error!("ubusd-rs: peer id space exhausted; dropping accepted fd");
+                            log::error!("ubusd: peer id space exhausted; dropping accepted fd");
                         }
                         Err(other) => {
                             // `PeerTable::insert` only returns `PeerIdExhausted`
@@ -477,7 +477,7 @@ impl Broker {
                             // broker down via `unreachable!()`. Drop the fd and
                             // log; a single misbehaving peer never ends the run.
                             log::error!(
-                            "ubusd-rs: peer insert returned unexpected error {other:?}; dropping fd"
+                            "ubusd: peer insert returned unexpected error {other:?}; dropping fd"
                         );
                         }
                     }
@@ -487,14 +487,14 @@ impl Broker {
                 // Per-connection errors: the listener is fine, this
                 // candidate isn't. Keep accepting.
                 Err(e @ (Errno::CONNABORTED | Errno::PROTO | Errno::PERM)) => {
-                    log::debug!("ubusd-rs: accept dropped one connection: {e:?}");
+                    log::debug!("ubusd: accept dropped one connection: {e:?}");
                     continue;
                 }
                 // Resource pressure: we can't accept right now. Yield —
                 // the next `poll_once` will re-fire POLLIN if the
                 // condition cleared.
                 Err(e @ (Errno::MFILE | Errno::NFILE | Errno::NOBUFS | Errno::NOMEM)) => {
-                    log::warn!("ubusd-rs: accept under resource pressure: {e:?}");
+                    log::warn!("ubusd: accept under resource pressure: {e:?}");
                     return Ok(());
                 }
                 // Listener-fatal: bad fd/socket/argument mean the
@@ -529,14 +529,14 @@ impl Broker {
                     }
                     Err(UbusError::Short { .. }) => break,
                     Err(e) => {
-                        log::warn!("ubusd-rs: peer {peer_id} malformed frame ({e:?}); closing");
+                        log::warn!("ubusd: peer {peer_id} malformed frame ({e:?}); closing");
                         close = true;
                         break;
                     }
                 }
             }
             if peer.rx_buf.len() > MAX_RX_BUF_BYTES {
-                log::warn!("ubusd-rs: peer {peer_id} rx_buf too large, closing");
+                log::warn!("ubusd: peer {peer_id} rx_buf too large, closing");
                 close = true;
             }
         }
@@ -615,7 +615,7 @@ impl Broker {
         let peer = match self.peers.get_mut(peer_id) {
             Some(p) => p,
             None => {
-                log::debug!("ubusd-rs: dropping frame for vanished peer {peer_id}");
+                log::debug!("ubusd: dropping frame for vanished peer {peer_id}");
                 return;
             }
         };
@@ -629,7 +629,7 @@ impl Broker {
             Some(f) => f,
             None => {
                 log::error!(
-                    "ubusd-rs: peer {peer_id} has no fd in enqueue_to_peer; closing (invariant violation)"
+                    "ubusd: peer {peer_id} has no fd in enqueue_to_peer; closing (invariant violation)"
                 );
                 self.pending_close.insert(peer_id);
                 return;
@@ -667,13 +667,11 @@ impl Broker {
 
     fn enqueue_bytes_with_fd(&mut self, peer_id: PeerId, bytes: &[u8], fd: OwnedFd) {
         let Some(peer) = self.peers.get_mut(peer_id) else {
-            log::debug!("ubusd-rs: dropping fd-bearing frame for vanished peer {peer_id}");
+            log::debug!("ubusd: dropping fd-bearing frame for vanished peer {peer_id}");
             return;
         };
         if peer.tx_buf.len().saturating_add(bytes.len()) > MAX_TX_BUF_BYTES {
-            log::warn!(
-                "ubusd-rs: peer {peer_id} tx_buf would exceed {MAX_TX_BUF_BYTES} B, closing"
-            );
+            log::warn!("ubusd: peer {peer_id} tx_buf would exceed {MAX_TX_BUF_BYTES} B, closing");
             self.pending_close.insert(peer_id);
             return;
         }
@@ -735,9 +733,7 @@ impl Broker {
             return;
         };
         if peer.tx_buf.len().saturating_add(bytes.len()) > MAX_TX_BUF_BYTES {
-            log::warn!(
-                "ubusd-rs: peer {peer_id} tx_buf would exceed {MAX_TX_BUF_BYTES} B, closing"
-            );
+            log::warn!("ubusd: peer {peer_id} tx_buf would exceed {MAX_TX_BUF_BYTES} B, closing");
             self.pending_close.insert(peer_id);
             return;
         }
@@ -762,7 +758,7 @@ impl Broker {
             Some(f) => f,
             None => {
                 log::error!(
-                    "ubusd-rs: peer {peer_id} has no fd in drain_tx; closing (invariant violation)"
+                    "ubusd: peer {peer_id} has no fd in drain_tx; closing (invariant violation)"
                 );
                 self.pending_close.insert(peer_id);
                 return;
@@ -907,7 +903,7 @@ impl Broker {
         }
         let _ = self.peers.remove(peer_id);
         log::debug!(
-            "ubusd-rs: peer {peer_id} closed; reaped {} objects",
+            "ubusd: peer {peer_id} closed; reaped {} objects",
             dead_objs.len()
         );
     }
@@ -938,7 +934,7 @@ impl Drop for Broker {
                 // at the same level as the pre-bind unlink so the
                 // operator gets a paired diagnostic.
                 log::warn!(
-                    "ubusd-rs: drop unlink {} failed: {}",
+                    "ubusd: drop unlink {} failed: {}",
                     self.config.socket_path,
                     io::Error::from_raw_os_error(e.raw_os_error()),
                 );
@@ -974,7 +970,7 @@ fn send_some<F: rustix::fd::AsFd>(
                 return SendOutcome::Closed;
             }
             Err(e) => {
-                log::warn!("ubusd-rs: {site} to peer {peer_id} failed: {e:?}");
+                log::warn!("ubusd: {site} to peer {peer_id} failed: {e:?}");
                 return SendOutcome::Closed;
             }
         }
@@ -1013,7 +1009,7 @@ fn send_some_with_ancillary<F: rustix::fd::AsFd>(
         let rights = rights_fd.map(|fd| [fd.as_fd()]);
         if let Some(rights) = rights.as_ref() {
             if !control.push(SendAncillaryMessage::ScmRights(rights)) {
-                log::error!("ubusd-rs: {site} SCM_RIGHTS buffer unexpectedly too small");
+                log::error!("ubusd: {site} SCM_RIGHTS buffer unexpectedly too small");
                 return SendOutcome::Closed;
             }
         }
@@ -1025,7 +1021,7 @@ fn send_some_with_ancillary<F: rustix::fd::AsFd>(
             Err(Errno::INTR) => continue,
             Err(Errno::PIPE) => return SendOutcome::Closed,
             Err(e) => {
-                log::warn!("ubusd-rs: {site} to peer {peer_id} failed: {e:?}");
+                log::warn!("ubusd: {site} to peer {peer_id} failed: {e:?}");
                 return SendOutcome::Closed;
             }
         }
@@ -1048,7 +1044,7 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
         Some(f) => f,
         None => {
             log::error!(
-                "ubusd-rs: peer {peer_id} has no fd in read_into_buf; closing (invariant violation)"
+                "ubusd: peer {peer_id} has no fd in read_into_buf; closing (invariant violation)"
             );
             return false;
         }
@@ -1085,7 +1081,7 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
                 // the post-decode check trips.
                 if peer.rx_buf.len().saturating_add(received.bytes) > MAX_RX_BUF_BYTES {
                     log::warn!(
-                        "ubusd-rs: peer {peer_id} rx_buf would exceed {MAX_RX_BUF_BYTES} B, closing"
+                        "ubusd: peer {peer_id} rx_buf would exceed {MAX_RX_BUF_BYTES} B, closing"
                     );
                     return false;
                 }
@@ -1094,7 +1090,7 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
             Err(Errno::AGAIN) => return true,
             Err(Errno::INTR) => continue,
             Err(e) => {
-                log::warn!("ubusd-rs: peer {peer_id} recv failed: {e:?}");
+                log::warn!("ubusd: peer {peer_id} recv failed: {e:?}");
                 return false;
             }
         }
@@ -1136,7 +1132,7 @@ fn accept_peer_credentials(credentials: &PeerCredentials, has_peer_uid_override:
 /// Read peer credentials through libc, not rustix, by design.
 ///
 /// The compatibility harness interposes `getsockopt(SO_PEERCRED)` via
-/// `LD_PRELOAD` to make upstream `ubusd` and `ubusd-rs` see the same
+/// `LD_PRELOAD` to make upstream `ubusd` and `ubusd` see the same
 /// client identity. Calling libc keeps that interposability property;
 /// a raw-syscall credential read would bypass the shim and make the
 /// two brokers observe different users under test.

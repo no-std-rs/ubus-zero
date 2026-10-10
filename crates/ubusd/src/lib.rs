@@ -1,7 +1,7 @@
-//! `ubusd-rs` — pure-Rust reimplementation of OpenWrt's `ubusd` broker.
+//! `ubusd` — pure-Rust reimplementation of OpenWrt's `ubusd` broker.
 //!
 //! Exposed as both lib and bin so a host process can run the broker
-//! standalone (the `ubusd-rs` bin) or embed it in-process by driving
+//! standalone (the `ubusd` bin) or embed it in-process by driving
 //! [`broker::Broker::poll_once`] from the host's event loop without
 //! spawning a separate `ubusd`.
 

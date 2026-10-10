@@ -4,7 +4,7 @@
 //! calls [`dispatch`], and applies each [`Action`] (write to a peer's
 //! tx buffer, schedule a peer for close). This split is what lets the
 //! protocol matrix be unit-tested in isolation under
-//! `cargo test -p ubusd-rs`.
+//! `cargo test -p ubusd`.
 //!
 //! The split also keeps the bug surface small: the routing logic is
 //! the most intricate part, and a function that takes plain data
@@ -177,7 +177,7 @@ fn dispatch_add_object(
                     // uses an unchecked allocator, so there is no parity
                     // target to match.
                     log::error!(
-                        "ubusd-rs: peer {src_peer} AddObject refused — obj id space exhausted"
+                        "ubusd: peer {src_peer} AddObject refused — obj id space exhausted"
                     );
                     return status_action(frame, src_peer, UBUS_STATUS_INVALID_ARGUMENT);
                 }
@@ -190,7 +190,7 @@ fn dispatch_add_object(
                 // resource-exhaustion status exists, so reject locally
                 // while keeping the broker alive for other peers.
                 log::error!(
-                    "ubusd-rs: peer {src_peer} anonymous AddObject refused — obj id space exhausted"
+                    "ubusd: peer {src_peer} anonymous AddObject refused — obj id space exhausted"
                 );
                 return status_action(frame, src_peer, UBUS_STATUS_INVALID_ARGUMENT);
             }
@@ -866,7 +866,7 @@ fn forward_owner_response(
         Some(id) => id,
         None => {
             log::debug!(
-                "ubusd-rs: peer {src_peer} {:?} with hdr.peer=0 dropped (no dest)",
+                "ubusd: peer {src_peer} {:?} with hdr.peer=0 dropped (no dest)",
                 frame.hdr.ty,
             );
             return Vec::new();

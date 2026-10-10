@@ -170,7 +170,7 @@ impl AclRegistry {
         let mut files = match fs::read_dir(dir) {
             Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
             Err(error) => {
-                log::warn!("ubusd-rs: unable to read ACL directory {dir}: {error}");
+                log::warn!("ubusd: unable to read ACL directory {dir}: {error}");
                 return AclLoad::default();
             }
         };
@@ -183,7 +183,7 @@ impl AclRegistry {
             let path = entry.path();
             match load_one(&path) {
                 Ok(entries) => registry.entries.extend(entries),
-                Err(error) => log::warn!("ubusd-rs: skipping ACL file {}: {error}", path.display()),
+                Err(error) => log::warn!("ubusd: skipping ACL file {}: {error}", path.display()),
             }
         }
         AclLoad {
@@ -768,8 +768,7 @@ mod tests {
 
     #[test]
     fn load_dir_of_a_missing_directory_is_an_empty_registry() {
-        let path =
-            std::env::temp_dir().join(format!("ubusd-rs-acl-missing-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("ubusd-acl-missing-{}", std::process::id()));
         let load = AclRegistry::load_dir(path.to_str().expect("temp path is utf-8"));
         assert!(load.registry.entries.is_empty());
         assert!(!load.had_candidates);

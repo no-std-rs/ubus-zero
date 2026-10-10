@@ -1,4 +1,4 @@
-//! Standalone broker binary: `ubusd-rs --socket /var/run/ubus.sock`.
+//! Standalone broker binary: `ubusd --socket /var/run/ubus.sock`.
 //!
 //! Signal handlers write tags to a self-pipe: TERM and INT make `run()` return
 //! cleanly so `Drop` unlinks the socket and the process exits 0, while HUP
@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use rustix::fd::{FromRawFd, IntoRawFd, OwnedFd};
-use ubusd_rs::{Broker, Config};
+use ubusd::{Broker, Config};
 
 static WAKE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 
@@ -83,7 +83,7 @@ fn setup_wake_pipe() -> Option<OwnedFd> {
     // descriptors are owned here and immediately wrapped in `OwnedFd`.
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
         eprintln!(
-            "ubusd-rs: create signal wake pipe: {}",
+            "ubusd: create signal wake pipe: {}",
             io::Error::last_os_error()
         );
         return None;
@@ -96,7 +96,7 @@ fn setup_wake_pipe() -> Option<OwnedFd> {
 
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         if let Err(e) = install_signal_handler(sig) {
-            eprintln!("ubusd-rs: install signal handler for {sig}: {e}");
+            eprintln!("ubusd: install signal handler for {sig}: {e}");
         }
     }
     Some(read_end)
@@ -116,7 +116,7 @@ fn main() -> ExitCode {
             match args.next() {
                 Some(v) => cfg.acl_dir = Some(v),
                 None => {
-                    eprintln!("ubusd-rs: {a} requires a value");
+                    eprintln!("ubusd: {a} requires a value");
                     return ExitCode::from(64);
                 }
             }
@@ -124,13 +124,13 @@ fn main() -> ExitCode {
             match args.next() {
                 Some(v) => cfg.socket_path = v,
                 None => {
-                    eprintln!("ubusd-rs: --socket requires a value");
+                    eprintln!("ubusd: --socket requires a value");
                     return ExitCode::from(64);
                 }
             }
         } else if a == "--help" || a == "-h" {
             println!(
-                "usage: ubusd-rs [--socket=/var/run/ubus.sock] [-A <acl-dir>|--acl-dir=<acl-dir>]\n\
+                "usage: ubusd [--socket=/var/run/ubus.sock] [-A <acl-dir>|--acl-dir=<acl-dir>]\n\
                  \n\
                  Pure-Rust ubusd reimplementation. Wire surface:\n\
                  HELLO / ADD_OBJECT / REMOVE_OBJECT / LOOKUP / INVOKE /\n\
@@ -138,7 +138,7 @@ fn main() -> ExitCode {
             );
             return ExitCode::SUCCESS;
         } else {
-            eprintln!("ubusd-rs: unknown arg: {a}");
+            eprintln!("ubusd: unknown arg: {a}");
             return ExitCode::from(64);
         }
     }
@@ -146,16 +146,16 @@ fn main() -> ExitCode {
     let mut broker = match Broker::bind(cfg.clone()) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("ubusd-rs: bind {}: {}", cfg.socket_path, e);
+            eprintln!("ubusd: bind {}: {}", cfg.socket_path, e);
             return ExitCode::from(2);
         }
     };
     if let Some(wake_pipe) = wake_pipe {
         broker.set_wake_pipe(wake_pipe);
     }
-    eprintln!("ubusd-rs: listening on {}", cfg.socket_path);
+    eprintln!("ubusd: listening on {}", cfg.socket_path);
     if let Err(e) = broker.run() {
-        eprintln!("ubusd-rs: fatal: {e}");
+        eprintln!("ubusd: fatal: {e}");
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

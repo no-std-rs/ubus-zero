@@ -1,5 +1,5 @@
 //! Wire-level cross-check: drive the in-tree client/server against
-//! both the upstream `ubusd` binary and `ubusd_rs::Broker` from one
+//! both the upstream `ubusd` binary and `ubusd::Broker` from one
 //! `rstest` body, so any divergence shows up as a paired pass/fail.
 //! Upstream reports a visible skip when its binary isn't reachable.
 
@@ -1203,7 +1203,7 @@ fn subscribe_then_notify_body(path: &str) {
 
     // SUBSCRIBE shape valid against both brokers: upstream reads only
     // the envelope (ATTR_OBJID = caller, ATTR_TARGET = publisher);
-    // in-tree `ubusd-rs` resolves the target via `hdr.peer` first, so
+    // in-tree `ubusd` resolves the target via `hdr.peer` first, so
     // setting it to the publisher's obj_id keeps both happy.
     let mut env = EnvBuilder::new();
     env.push_u32(UbusAttr::ObjId, sub_obj_id);

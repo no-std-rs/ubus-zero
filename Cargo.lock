@@ -278,6 +278,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ubus-client"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde_json",
+ "ubus-testkit",
+ "ubus-zero",
+ "ubusd",
+]
+
+[[package]]
 name = "ubus-testkit"
 version = "0.1.0"
 dependencies = [
@@ -297,11 +308,11 @@ dependencies = [
  "spin",
  "thiserror",
  "ubus-testkit",
- "ubusd-rs",
+ "ubusd",
 ]
 
 [[package]]
-name = "ubusd-rs"
+name = "ubusd"
 version = "0.1.0"
 dependencies = [
  "libc",

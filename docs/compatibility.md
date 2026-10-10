@@ -1,6 +1,6 @@
 # Compatibility testing
 
-The compatibility rule is simple: on supported protocol paths, `ubusd-rs`
+The compatibility rule is simple: on supported protocol paths, the Rust `ubusd`
 matches the pinned OpenWrt `ubusd` reference behavior byte for byte. A detected
 divergence is fixed in the Rust implementation or in the shared canonicalizer;
 individual tests do not get normalization escape hatches.
@@ -20,7 +20,7 @@ strict suite.
 | Layer | Purpose | Runs without Docker artifacts |
 | --- | --- | :---: |
 | Core unit and round-trip tests | framing, codecs, client, server, transport contracts | yes |
-| `ubusd-rs` smoke tests | broker routing, ACL, lifecycle, limits, malformed input | yes |
+| Rust `ubusd` smoke tests | broker routing, ACL, lifecycle, limits, malformed input | yes |
 | Golden replay | compare the Rust broker with recorded upstream transcripts | yes |
 | Live broker matrix | run scenarios against upstream and Rust brokers | no |
 | Canonical parity | normalize broker-minted IDs, then compare complete transcripts | no |
@@ -125,7 +125,7 @@ corruptions from literal or environment-provided seeds. Its always-on contract
 is robustness: neither broker may crash, hang, or become unable to answer a
 fresh ping.
 
-Arbitrary malformed input is outside the byte-parity contract. `ubusd-rs` may
+Arbitrary malformed input is outside the byte-parity contract. the Rust `ubusd` may
 strict-close where upstream returns an error. Accepted strict-close cases and
 fixed bugs live in `crates/testkit/corpus/`; explored long-tail status
 differences do not.

@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from urllib.parse import quote
+from release_packages import PACKAGES
 
 
 def gh(arguments):
@@ -21,7 +22,7 @@ def attach(repository, tag, directory):
     if not re.fullmatch(r"ubus-zero-v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", tag):
         raise ValueError("expected a stable ubus-zero release tag")
     version = tag.removeprefix("ubus-zero-v")
-    files = [Path(directory) / f"ubus-zero-{version}.cargo-upload", Path(directory) / "SHA256SUMS"]
+    files = [Path(directory) / f"{name}-{version}.cargo-upload" for name in PACKAGES] + [Path(directory) / "SHA256SUMS"]
     release = json.loads(gh(["api", f"repos/{repository}/releases/tags/{quote(tag, safe='')}"]))
     if release["tag_name"] != tag or release["draft"] or release["prerelease"]:
         raise ValueError("expected the matching published stable release")

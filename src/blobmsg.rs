@@ -124,6 +124,11 @@ impl BlobBuilder {
         self.put_attr(BlobType::Int8, name, &[val as u8]);
     }
 
+    /// Embed an existing table without decoding and rebuilding its attributes.
+    pub fn put_table(&mut self, name: Option<&str>, table: &BlobMsgTable) {
+        self.put_attr(BlobType::Table, name, table.contents());
+    }
+
     /// Panics in debug if any container is still open. Release builds
     /// would emit a frame with the outer length field unpatched (zero)
     /// and ubusd would reject it; either way the bug would only show

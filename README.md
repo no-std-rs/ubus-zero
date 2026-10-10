@@ -15,6 +15,18 @@
 Rust programs a synchronous client, an object provider, and compatible
 blob/blobmsg codecs without requiring the standard library.
 
+The workspace also provides the installable Linux tools `ubusd` and
+[`ubus-client`](crates/ubus-client/README.md). `ubus-client` supports object
+discovery, calls, events, subscriptions, monitoring, JSON Lines batches, and
+shell-backed object providers:
+
+```sh
+cargo install ubusd
+cargo install ubus-client
+ubusd --socket /tmp/ubus.sock
+ubus-client -s /tmp/ubus.sock list
+```
+
 The crates.io package is `ubus-zero`; the library name is simply `ubus`:
 
 ```toml
@@ -69,11 +81,22 @@ flowchart LR
     class Transport seam;
 ```
 
-The protocol crate never opens a socket. A transport sends complete
+The default protocol implementation never opens a socket. A transport sends complete
 `wire::Frame` values, returns complete incoming frames, and supplies the wait
 hook used between non-blocking receive attempts. That separation keeps the API
 usable in embedded runtimes, Linux daemons, simulators, and deterministic test
 harnesses.
+
+Optional features provide reusable adapters extracted from Cellctl:
+
+- `json`: `ubus::json::{json_to_blobmsg, blobmsg_to_json}` converts nested JSON
+  objects and validates blobmsg replies, using `alloc` without `std`.
+- `unix`: `ubus::unix::UnixUbusTransport` opens Linux Unix sockets through
+  rustix and supports monotonic request deadlines, using `alloc` without `std`.
+
+`UbusClient` additionally supports object/signature discovery, every DATA reply
+from a call, events, subscriptions, monitoring, and buffered asynchronous frames.
+See [Cellctl imports](docs/cellctl-imports.md) for their source and adaptations.
 
 ### Provide an object
 
@@ -121,14 +144,18 @@ injection, and cross-broker tests. The full test doctrine lives in
 
 ## Repository
 
-Only the root `ubus-zero` package is published.
+The protocol library, daemon and CLI are public packages. `ubus-testkit` and
+its workspace FFI shim remain internal compatibility infrastructure. The
+existing [`libubox-sys`](https://crates.io/crates/libubox-sys) package is maintained
+in [`pawelchcki/libubox`](https://github.com/pawelchcki/libubox).
 
 ```text
 .
 ├── src/                  public no_std protocol library
-├── crates/ubusd/         private pure-Rust compatibility broker
+├── crates/ubusd/         public daemon and embeddable broker
+├── crates/ubus-client/   public CLI-only package
 ├── crates/testkit/       private matrix, goldens, shims, and fault tools
-├── crates/libubox-sys/   private reference-implementation FFI
+├── crates/libubox-sys/   internal reference-implementation FFI shim
 ├── tests/                cross-broker integration suites
 └── tools/                pinned OpenWrt fixture builder
 ```
@@ -138,7 +165,7 @@ Start with:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo build -p ubusd-rs --features testing
+cargo build -p ubusd --features testing
 cargo test --workspace --all-features
 ```
 

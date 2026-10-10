@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   crate:
-    name: Prepare ubus-zero for Runnerless
+    name: Prepare public crates for Runnerless
     if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -40,8 +40,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -m unittest discover -s scripts -p '*_test.py'
           python3 scripts/prepare-release.py "$RELEASE_TAG"
+          python3 scripts/check-public-packages.py
           cargo test --locked --workspace --all-features
-          cargo package -p ubus-zero --locked --allow-dirty
       - name: Capture the Cargo upload against a local registry
         run: |
           python3 scripts/package-registry-uploads.py dist/registry

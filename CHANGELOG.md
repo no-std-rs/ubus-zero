@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Installable `ubus-client` with discovery, calls, events, subscriptions,
+  monitoring, deadlines, JSON Lines batches and shell-backed object providers.
+- Optional `json` and Linux `unix` library adapters extracted from Cellctl.
+- Client APIs for object signatures, multiple replies and buffered asynchronous
+  traffic.
+- Embedded Runnerless release-please publishing for the public workspace crates.
+
+### Changed
+
+- Expose the Rust broker as the `ubusd` crate and executable.
+- Support explicit OpenWrt library/header discovery for packaged FFI bindings.
+
 ## [0.1.0] - 2026-07-29
 
 ### Added

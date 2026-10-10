@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Align the packaged root crate with Runnerless's recorded release version."""
+"""Align public manifests, dependency requirements and lock entries for a release."""
 
 from pathlib import Path
 import re
 import sys
 import tomllib
+from release_packages import PACKAGES
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
@@ -16,21 +17,39 @@ def prepare(tag):
     version = tag.removeprefix("ubus-zero-v")
     if ROOT.joinpath("version.txt").read_text().strip() != version:
         raise ValueError("tag differs from version.txt")
-    manifest = ROOT / "Cargo.toml"
+    updates = {}
+    manifests = list(PACKAGES.values())
+    for relative in manifests:
+        manifest = ROOT / relative
+        source = manifest.read_text()
+        parsed = tomllib.loads(source)
+        if relative in PACKAGES.values():
+            if PACKAGES.get(parsed["package"]["name"]) != relative:
+                raise ValueError(f"unexpected package name in {relative}")
+            source, count = re.subn(r'(?m)^version\s*=\s*"[^"\n]+"', f'version = "{version}"', source)
+            if count != 1:
+                raise ValueError(f"expected one package version in {relative}")
+
+        def dependency(match):
+            name, body = match[1], match[2]
+            fields = tomllib.loads("dependency = {" + body + "}")["dependency"]
+            if fields.get("package", name) in PACKAGES and "path" in fields and "version" in fields:
+                body = re.sub(r'version\s*=\s*"[^"\n]+"', f'version = "{version}"', body)
+            return name + " = {" + body + "}"
+
+        source = re.sub(r'(?m)^([A-Za-z0-9_-]+)\s*=\s*\{([^\n]+)\}', dependency, source)
+        updates[manifest] = source
     lock = ROOT / "Cargo.lock"
-    source = manifest.read_text()
-    if tomllib.loads(source)["package"]["name"] != "ubus-zero":
-        raise ValueError("unexpected package name")
-    updated, count = re.subn(r'(?m)^version\s*=\s*"[^"\n]+"', f'version = "{version}"', source)
-    if count != 1:
-        raise ValueError("expected one package version in Cargo.toml")
-    locked, count = re.subn(r'(\[\[package\]\]\nname = "ubus-zero"\n)version = "[^"\n]+"',
-                            lambda match: match[1] + f'version = "{version}"', lock.read_text())
-    if count != 1:
-        raise ValueError("expected one ubus-zero entry in Cargo.lock")
-    # Validate both files before writing either. Private workspace versions stay intact.
-    manifest.write_text(updated)
-    lock.write_text(locked)
+    locked = lock.read_text()
+    for name in PACKAGES:
+        locked, count = re.subn(r'(\[\[package\]\]\nname = "' + re.escape(name) + r'"\n)version = "[^"\n]+"',
+                               lambda match: match[1] + f'version = "{version}"', locked)
+        if count != 1:
+            raise ValueError(f"expected one {name} entry in Cargo.lock")
+    updates[lock] = locked
+    # Validate every manifest and lock entry before writing any file.
+    for path, source in updates.items():
+        path.write_text(source)
 
 
 if __name__ == "__main__":

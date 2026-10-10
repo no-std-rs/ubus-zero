@@ -15,6 +15,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=UBUS_ZERO_LIBUBOX_DIR");
     // Tell rustc the cfg name is intentional so check-cfg doesn't warn.
     println!("cargo::rustc-check-cfg=cfg(have_libubox)");
@@ -36,11 +37,19 @@ fn main() {
         .and_then(Path::parent)
         .expect("workspace root")
         .to_path_buf();
-    let dep_bin = workspace_root.join(".dep/bin");
+    let explicit = env::var_os("UBUS_ZERO_LIBUBOX_DIR").map(PathBuf::from);
+    let dep_bin = explicit
+        .clone()
+        .unwrap_or_else(|| workspace_root.join(".dep/bin"));
     println!("cargo:rerun-if-changed={}", dep_bin.display());
     emit_probe_dir_reruns(&workspace_root);
 
-    let Some(include_dir) = locate_include_dir(&workspace_root) else {
+    let include_dir = if explicit.is_some() {
+        Some(dep_bin.join("include"))
+    } else {
+        locate_include_dir(&workspace_root)
+    };
+    let Some(include_dir) = include_dir else {
         println!(
             "cargo:warning=libubox-sys: no headers under {} or {} — run tools/ubusd-builder/build.sh; FFI disabled",
             workspace_root.join(".dep/bin/include").display(),
@@ -50,6 +59,12 @@ fn main() {
         return;
     };
     emit_include_reruns(&include_dir);
+    if explicit.is_some()
+        && (!include_dir.join("libubus.h").is_file()
+            || !include_dir.join("libubox/blobmsg.h").is_file())
+    {
+        panic!("UBUS_ZERO_LIBUBOX_DIR must contain libubus.so, libubox.so and include/libubus.h and include/libubox/blobmsg.h");
+    }
 
     let libubox_so = dep_bin.join("libubox.so");
     let libubus_so = dep_bin.join("libubus.so");
@@ -60,6 +75,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", blobmsg_json_header.display());
     println!("cargo:rerun-if-changed={}", libblobmsg_json_so.display());
     if !libubox_so.is_file() || !libubus_so.is_file() {
+        assert!(
+            explicit.is_none(),
+            "UBUS_ZERO_LIBUBOX_DIR is missing libubus.so or libubox.so"
+        );
         println!(
             "cargo:warning=libubox-sys: missing {} or {} — run tools/ubusd-builder/build.sh; FFI disabled",
             libubox_so.display(),
@@ -72,6 +91,10 @@ fn main() {
     let Some((blob_buf_size, ubus_context_size, blob_attr_size)) =
         probe_sizes(&include_dir, &out_dir)
     else {
+        assert!(
+            explicit.is_none(),
+            "UBUS_ZERO_LIBUBOX_DIR sizeof probe failed; check headers, target and compiler"
+        );
         println!(
             "cargo:warning=libubox-sys: sizeof probe failed — header / compiler mismatch; FFI disabled"
         );
@@ -83,6 +106,10 @@ fn main() {
     let have_blobmsg_json = blobmsg_json_header.is_file() && libblobmsg_json_so.is_file();
 
     if !compile_accessors(&include_dir, &out_dir, have_blobmsg_json) {
+        assert!(
+            explicit.is_none(),
+            "UBUS_ZERO_LIBUBOX_DIR accessor compilation failed"
+        );
         println!("cargo:warning=libubox-sys: accessors.c compile failed; FFI disabled");
         write_fallback_sizes(&out_dir);
         return;
