@@ -17,7 +17,10 @@
 # every consumer (CI runners, dev containers) catches up.
 FROM debian:bullseye-slim AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Bullseye is archived after its LTS period. Keep its glibc baseline while
+# fetching packages from the archive, with normal APT signature checks.
+RUN sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         cmake \
         dpkg-dev \
