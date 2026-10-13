@@ -15,6 +15,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Client APIs for object signatures, multiple replies and buffered asynchronous
   traffic.
 - Embedded Runnerless release-please publishing for the public workspace crates.
+- Runl setup for the three-crate publishing destination and Production environment.
 
 ### Changed
 

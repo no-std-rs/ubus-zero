@@ -4,8 +4,13 @@ A Linux CLI for OpenWrt ubus, implemented in Rust using `ubus-zero`. This crate
 contains only the executable. Applications use `ubus-zero` for protocol APIs,
 JSON conversion and the optional Linux Unix-socket adapter.
 
+The examples assume a running broker at the chosen socket and services providing
+the named objects. Registration, calls, subscriptions, and events require root
+clients or matching [broker ACL grants](https://github.com/no-std-rs/ubus-zero/blob/main/crates/ubusd/README.md#access-control);
+monitoring requires root.
+
 ```sh
-cargo install ubus-client
+cargo install --git https://github.com/no-std-rs/ubus-zero ubus-client
 ubus-client -s /var/run/ubus/ubus.sock list
 ubus-client call system board
 printf '{"interface":"wan"}\n' | ubus-client call network.interface status -
@@ -51,8 +56,14 @@ the reply. `UBUS_OBJECT` and `UBUS_METHOD` identify the invocation. Program stde
 goes to the CLI's stderr; arguments are passed directly without a shell:
 
 ```sh
-ubus-client serve example.echo echo -- cat
-ubus-client call example.echo echo '{"message":"hello"}'
+ubus-client -s /tmp/ubus.sock serve example.echo echo -- cat
+```
+
+Keep the provider running, then call it from another terminal using the same
+socket path:
+
+```sh
+ubus-client -s /tmp/ubus.sock call example.echo echo '{"message":"hello"}'
 ```
 
 Each handler has the configured request timeout. Failed handlers return an ubus
