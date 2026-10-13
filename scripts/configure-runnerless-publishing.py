@@ -67,6 +67,7 @@ def configure(organization, *, dry_run=False, organization_credential=False,
         raise SystemExit("Production configuration differs from the requested configuration.")
     print(json.dumps({"repository": REPOSITORY, "production": actual["production"],
                       "crates": saved}, indent=2))
+    # Runnerless reports environment_disabled for credentials when Production is off.
     credentials = {item["package"]: item["status"] for item in saved["package_credentials"]}
     if any(credentials.get(name) != "configured" for name in PACKAGES):
         print("Publishing is waiting for credentials or enabled Production. "

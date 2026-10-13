@@ -25,7 +25,7 @@ subscribe, or send/listen for events. Omitting `--acl-dir` leaves those operatio
 denied for non-root clients. Root clients bypass ACLs; monitoring requires root.
 
 Pass `--acl-dir /etc/ubus/acl.d` to load `*.json` ACL files. Files must be owned
-by root and must not be writable by group or others. For example,
+by `root:root` and must not be writable by group or others. For example,
 `/etc/ubus/acl.d/example.json` can allow the local user `alice` to provide and call
 the CLI's echo service:
 

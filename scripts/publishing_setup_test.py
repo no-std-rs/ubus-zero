@@ -79,6 +79,17 @@ class PublishingSetupTest(unittest.TestCase):
             self.configure(enable_production=True)
         self.assertTrue(all(method == "GET" for method, _, _ in self.calls))
 
+    def test_disabled_production_with_stored_credentials_reports_waiting(self):
+        self.production = {"id": "production-id", "enabled": False}
+        self.target["package_credentials"] = [
+            {"package": name, "status": "environment_disabled"} for name in setup.PACKAGES
+        ]
+        output = io.StringIO()
+        with patch.object(setup, "api", side_effect=self.api), contextlib.redirect_stdout(output):
+            setup.configure("org-id")
+        self.assertIn("Publishing is waiting for credentials or enabled Production.", output.getvalue())
+        self.assertFalse(self.production["enabled"])
+
     def test_failed_readback_is_reported(self):
         original = self.api
 
