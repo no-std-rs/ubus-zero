@@ -4,8 +4,6 @@
 
 <p align="center">
   <a href="https://github.com/no-std-rs/ubus-zero/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/no-std-rs/ubus-zero/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://crates.io/crates/ubus-zero"><img alt="crates.io" src="https://img.shields.io/crates/v/ubus-zero.svg"></a>
-  <a href="https://docs.rs/ubus-zero"><img alt="docs.rs" src="https://img.shields.io/docsrs/ubus-zero"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <img alt="no_std + alloc" src="https://img.shields.io/badge/no__std-alloc-6e40c9">
 </p>
@@ -15,26 +13,52 @@
 Rust programs a synchronous client, an object provider, and compatible
 blob/blobmsg codecs without requiring the standard library.
 
-The workspace also provides the installable Linux tools `ubusd` and
-[`ubus-client`](crates/ubus-client/README.md). `ubus-client` supports object
+The workspace also provides the Linux broker [`ubusd`](https://github.com/no-std-rs/ubus-zero/blob/main/crates/ubusd/README.md) and
+[`ubus-client`](https://github.com/no-std-rs/ubus-zero/blob/main/crates/ubus-client/README.md). `ubus-client` supports object
 discovery, calls, events, subscriptions, monitoring, JSON Lines batches, and
-shell-backed object providers:
+object providers that run external programs. Install both tools from the Git repository:
 
 ```sh
-cargo install ubusd
-cargo install ubus-client
+cargo install --git https://github.com/no-std-rs/ubus-zero ubusd
+cargo install --git https://github.com/no-std-rs/ubus-zero ubus-client
+```
+
+Start the broker in one terminal:
+
+```sh
 ubusd --socket /tmp/ubus.sock
+```
+
+In another terminal, list registered objects using the same socket:
+
+```sh
 ubus-client -s /tmp/ubus.sock list
 ```
 
-The crates.io package is `ubus-zero`; the library name is simply `ubus`:
+The broker routes requests to registered services; it does not provide OpenWrt
+services such as `system` by itself. See the [CLI guide](https://github.com/no-std-rs/ubus-zero/blob/main/crates/ubus-client/README.md)
+to register your own provider with `serve`.
+
+Non-root clients need ACL grants for named object registration, method calls,
+subscriptions, and events. See the [daemon guide](https://github.com/no-std-rs/ubus-zero/blob/main/crates/ubusd/README.md#access-control)
+for an example. Root clients bypass ACLs; monitoring requires root.
+
+## Use the library
+
+The Cargo package is `ubus-zero`; the library name is simply `ubus`. To use the
+library from this Git repository:
 
 ```toml
 [dependencies]
-ubus = { package = "ubus-zero", version = "0.1", default-features = false }
+ubus = { package = "ubus-zero", git = "https://github.com/no-std-rs/ubus-zero", default-features = false }
 ```
 
+Given a connected `Transport` and a service providing `system.board`:
+
 ```rust
+extern crate alloc;
+
+use alloc::vec::Vec;
 use ubus::client::UbusClient;
 use ubus::{BlobMsgTable, Transport};
 
@@ -44,6 +68,10 @@ fn board<T: Transport>(transport: T) -> ubus::Result<Vec<u8>> {
     client.invoke(system, "board", &BlobMsgTable::empty())
 }
 ```
+
+`UbusClient::connect` performs the ubus handshake over the supplied transport.
+`invoke` returns the last DATA reply as blobmsg table contents. `invoke_many`
+returns all DATA replies, or an empty list when a call succeeds without a DATA reply.
 
 ## Why ubus-zero?
 
@@ -81,11 +109,11 @@ flowchart LR
     class Transport seam;
 ```
 
-The default protocol implementation never opens a socket. A transport sends complete
-`wire::Frame` values, returns complete incoming frames, and supplies the wait
-hook used between non-blocking receive attempts. That separation keeps the API
-usable in embedded runtimes, Linux daemons, simulators, and deterministic test
-harnesses.
+With no features enabled, the library never opens a socket. A transport sends
+complete `wire::Frame` values, returns complete incoming frames, and supplies
+the wait hook used between non-blocking receive attempts. That separation keeps
+the API usable in embedded runtimes, Linux daemons, simulators, and deterministic
+test harnesses.
 
 Optional features provide reusable adapters extracted from Cellctl:
 
@@ -94,27 +122,54 @@ Optional features provide reusable adapters extracted from Cellctl:
 - `unix`: `ubus::unix::UnixUbusTransport` opens Linux Unix sockets through
   rustix and supports monotonic request deadlines, using `alloc` without `std`.
 
-`UbusClient` additionally supports object/signature discovery, every DATA reply
-from a call, events, subscriptions, monitoring, and buffered asynchronous frames.
-See [Cellctl imports](docs/cellctl-imports.md) for their source and adaptations.
+Add `features = ["json", "unix"]` to the dependency declaration to enable both.
+For example, on Linux with `unix` enabled:
+
+```rust
+use core::time::Duration;
+use ubus::client::UbusClient;
+use ubus::unix::UnixUbusTransport;
+
+fn ping() -> ubus::Result<()> {
+    let mut transport = UnixUbusTransport::connect("/tmp/ubus.sock")?;
+    transport.set_deadline(Some(Duration::from_secs(5)));
+    let mut client = UbusClient::connect(transport)?;
+    client.transport_mut().set_deadline(Some(Duration::from_secs(5)));
+    client.ping()
+}
+```
+
+Reset the transport deadline before each request when reusing a connection.
+The client also supports object/signature discovery, events, subscriptions,
+and monitoring.
+`UbusClient::request` and the methods built on it (such as `invoke_many`) buffer
+asynchronous frames for `recv_frame`. The simpler `lookup` and `invoke` methods
+do not retain unrelated frames, so use the request-based methods when mixing
+calls with events or subscriptions. See [Cellctl imports](docs/cellctl-imports.md)
+for the source and adaptations of these APIs.
 
 ### Provide an object
 
 ```rust
 use ubus::server::UbusConnection;
-use ubus::{BlobMsgTable, DispatchOutcome, Transport, UbusObject};
+use ubus::{BlobMsgTable, Transport, UbusObject};
 
-fn serve_once<T: Transport>(transport: T) -> ubus::Result<DispatchOutcome> {
+fn register_echo<T: Transport>(transport: T) -> ubus::Result<UbusConnection<T>> {
     let object = UbusObject::new("example.echo").method("ping", |_request| {
         Ok(BlobMsgTable::build(|reply| {
             reply.put_str(Some("message"), "pong");
         }))
     });
 
-    let mut connection = UbusConnection::connect_and_register(transport, object)?;
-    connection.poll_one()
+    UbusConnection::connect_and_register(transport, object)
 }
 ```
+
+Keep the returned connection alive and call `poll_one()` repeatedly from your
+application's event loop. Each call processes at most one frame;
+`DispatchOutcome::Idle` means no complete frame is available, so the caller
+should wait or yield before polling again. Registration alone does not dispatch
+requests.
 
 Handlers receive the contents of the request's blobmsg table and return a
 `BlobMsgTable`. Handler failures become an ubus status and are also reported as
@@ -134,8 +189,10 @@ fn hostname(reply: &[u8]) -> Option<&str> {
 
 `ubus-zero` is a focused protocol implementation, not a source-compatible port
 of the C `libubus` API. The current API is synchronous and
-non-blocking-poll-oriented. Callers own connection establishment, deadlines,
-scheduling, and their concrete transport.
+uses non-blocking receives. Client requests and registration wait for replies
+through `Transport::wait_recv`; provider dispatch uses `poll_one`. Callers choose
+their transport and control deadlines and scheduling. The optional Linux adapter
+provides socket I/O; the protocol core can use a custom transport.
 
 The project is pre-1.0. Minor versions may refine public APIs, but wire
 compatibility is guarded by canonical transcripts, checked-in goldens, fault
@@ -160,7 +217,9 @@ in [`pawelchcki/libubox`](https://github.com/pawelchcki/libubox).
 └── tools/                pinned OpenWrt fixture builder
 ```
 
-Start with:
+For local development on Linux, use the pinned Rust toolchain and a C compiler
+(`cc`) for the testkit's fault-injection shims. Run these checks from the
+repository root:
 
 ```sh
 cargo fmt --all -- --check
@@ -169,7 +228,10 @@ cargo build -p ubusd --features testing
 cargo test --workspace --all-features
 ```
 
-Building the pinned OpenWrt comparison binaries requires Docker Buildx:
+The default test run exercises the Rust implementation and checked-in goldens;
+tests needing absent OpenWrt fixtures are skipped. To run the full live
+compatibility suite, build the pinned OpenWrt fixtures with Docker Buildx and
+require them:
 
 ```sh
 tools/ubusd-builder/build.sh
