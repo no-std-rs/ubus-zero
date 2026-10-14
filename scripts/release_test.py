@@ -112,8 +112,19 @@ class ReleaseIdentityTest(unittest.TestCase):
             command('cargo', 'package', '-p', 'ubus-zero', '--list')
         command('cargo', 'package', '-p', 'ubus-zero', '--list', '--allow-dirty')
         output = self.root / 'dist/registry'
-        with patch.object(uploads, 'ROOT', self.root), patch.object(sys, 'argv', ['package-registry-uploads.py', str(output)]), patch.dict(os.environ, {'CARGO_HOME': str(self.root / '.cargo-home')}):
+        # The capture index mirrors crates.io, where a published 0.2.0 would make Cargo refuse
+        # these fixture uploads as duplicates. Keep the upstream mirror empty so the regression
+        # stays hermetic, and prove it only ever looked up the fixture's own packages.
+        upstream = []
+
+        def unpublished(url, timeout):
+            upstream.append(url)
+            raise uploads.urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+
+        with patch.object(uploads, 'ROOT', self.root), patch.object(sys, 'argv', ['package-registry-uploads.py', str(output)]), patch.dict(os.environ, {'CARGO_HOME': str(self.root / '.cargo-home')}), patch.object(uploads.urllib.request, 'urlopen', unpublished):
             uploads.main()
+        self.assertTrue(upstream)
+        self.assertLessEqual(set(upstream), {'https://index.crates.io/' + uploads.index_path(name) for name in prepare.PACKAGES})
         checksums = output.joinpath('SHA256SUMS').read_text()
         for name in prepare.PACKAGES:
             asset = output / f'{name}-0.2.0.cargo-upload'
