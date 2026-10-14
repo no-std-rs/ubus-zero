@@ -108,6 +108,8 @@ class ReleaseIdentityTest(unittest.TestCase):
         metadata = json.loads(command('cargo', 'metadata', '--no-deps', '--format-version', '1'))
         public = {package['name']: package['version'] for package in metadata['packages'] if package['publish'] != []}
         self.assertEqual(public, dict.fromkeys(prepare.PACKAGES, '0.2.0'))
+        with self.assertRaises(subprocess.CalledProcessError):
+            command('cargo', 'package', '-p', 'ubus-zero', '--list')
         command('cargo', 'package', '-p', 'ubus-zero', '--list', '--allow-dirty')
         output = self.root / 'dist/registry'
         with patch.object(uploads, 'ROOT', self.root), patch.object(sys, 'argv', ['package-registry-uploads.py', str(output)]), patch.dict(os.environ, {'CARGO_HOME': str(self.root / '.cargo-home')}):
@@ -123,6 +125,9 @@ class ReleaseIdentityTest(unittest.TestCase):
         for name in ['testkit', 'libubox-sys']:
             manifest = prepare.tomllib.loads(self.root.joinpath(f'crates/{name}/Cargo.toml').read_text())
             self.assertEqual(manifest['package']['version'], '0.1.0')
+        locked = prepare.tomllib.loads(self.root.joinpath('Cargo.lock').read_text())['package']
+        self.assertEqual({package['name']: package['version'] for package in locked if package['name'] not in prepare.PACKAGES},
+                         {'ubus-testkit': '0.1.0', 'ubus-libubox-sys': '0.1.0'})
 
 
 class UploadIdentityTest(unittest.TestCase):
