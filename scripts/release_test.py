@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import hashlib
+import os
 from pathlib import Path
+import subprocess
 import struct
 import sys
 import tempfile
@@ -67,6 +70,75 @@ class ReleaseIdentityTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare.prepare("ubus-zero-v0.2.0")
         self.assertEqual(before, self.root.joinpath("Cargo.toml").read_bytes())
+
+    def test_generated_release_packages_in_real_git_checkout(self):
+        def command(*args):
+            return subprocess.check_output(args, cwd=self.root, stderr=subprocess.STDOUT)
+
+        for name, relative in prepare.PACKAGES.items():
+            manifest = self.root / relative
+            dependencies = ('\n[dependencies]\nubus = { package = "ubus-zero", path = "../..", version = "0.1.0" }\n'
+                            if name != "ubus-zero" else '')
+            manifest.write_text(f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n'
+                                'license = "MIT"\ndescription = "Release packaging regression fixture"\n'
+                                'publish = ["crates-io", "runnerless-capture"]\n' + dependencies)
+            source = manifest.parent / 'src'
+            source.mkdir(exist_ok=True)
+            source.joinpath('lib.rs').write_text('pub fn value() -> u8 { ' + ('42' if name == 'ubus-zero' else 'ubus::value()') + ' }\n')
+        for name in ['testkit', 'libubox-sys']:
+            directory = self.root / 'crates' / name
+            directory.mkdir(exist_ok=True)
+            directory.joinpath('Cargo.toml').write_text(f'[package]\nname = "ubus-{name}"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n')
+            directory.joinpath('src').mkdir(exist_ok=True)
+            directory.joinpath('src/lib.rs').write_text('pub fn fixture() {}\n')
+        with self.root.joinpath('Cargo.toml').open('a') as manifest:
+            manifest.write('\n[workspace]\nresolver = "2"\nmembers = ["crates/ubusd", "crates/ubus-client", "crates/testkit", "crates/libubox-sys"]\n')
+        self.root.joinpath('version.txt').write_text('0.1.0\n')
+        self.root.joinpath('.gitignore').write_text('/target/\n/dist/\n/.cargo-home/\n')
+        self.root.joinpath('Cargo.lock').unlink()
+        command('cargo', 'generate-lockfile', '--offline')
+        command('git', 'init', '-b', 'main')
+        command('git', 'add', '.')
+        command('git', '-c', 'user.name=Release regression', '-c', 'user.email=release@example.invalid', 'commit', '-m', 'baseline public crates at 0.1.0')
+        command('git', 'checkout', '-b', 'release-please--branches--main')
+        # These are the two files the release proposal changes.
+        self.root.joinpath('version.txt').write_text('0.2.0\n')
+        self.root.joinpath('CHANGELOG.md').write_text('# 0.2.0\n\nRelease fixture.\n')
+        prepare.prepare('ubus-zero-v0.2.0')
+        metadata = json.loads(command('cargo', 'metadata', '--no-deps', '--format-version', '1'))
+        public = {package['name']: package['version'] for package in metadata['packages'] if package['publish'] != []}
+        self.assertEqual(public, dict.fromkeys(prepare.PACKAGES, '0.2.0'))
+        with self.assertRaises(subprocess.CalledProcessError):
+            command('cargo', 'package', '-p', 'ubus-zero', '--list')
+        command('cargo', 'package', '-p', 'ubus-zero', '--list', '--allow-dirty')
+        output = self.root / 'dist/registry'
+        # The capture index mirrors crates.io, where a published 0.2.0 would make Cargo refuse
+        # these fixture uploads as duplicates. Keep the upstream mirror empty so the regression
+        # stays hermetic, and prove it only ever looked up the fixture's own packages.
+        upstream = []
+
+        def unpublished(url, timeout):
+            upstream.append(url)
+            raise uploads.urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+
+        with patch.object(uploads, 'ROOT', self.root), patch.object(sys, 'argv', ['package-registry-uploads.py', str(output)]), patch.dict(os.environ, {'CARGO_HOME': str(self.root / '.cargo-home')}), patch.object(uploads.urllib.request, 'urlopen', unpublished):
+            uploads.main()
+        self.assertTrue(upstream)
+        self.assertLessEqual(set(upstream), {'https://index.crates.io/' + uploads.index_path(name) for name in prepare.PACKAGES})
+        checksums = output.joinpath('SHA256SUMS').read_text()
+        for name in prepare.PACKAGES:
+            asset = output / f'{name}-0.2.0.cargo-upload'
+            body = asset.read_bytes()
+            size = struct.unpack_from('<I', body)[0]
+            identity = json.loads(body[4:4 + size])
+            self.assertEqual((identity['name'], identity['vers']), (name, '0.2.0'))
+            self.assertIn(hashlib.sha256(body).hexdigest() + '  ' + asset.name, checksums)
+        for name in ['testkit', 'libubox-sys']:
+            manifest = prepare.tomllib.loads(self.root.joinpath(f'crates/{name}/Cargo.toml').read_text())
+            self.assertEqual(manifest['package']['version'], '0.1.0')
+        locked = prepare.tomllib.loads(self.root.joinpath('Cargo.lock').read_text())['package']
+        self.assertEqual({package['name']: package['version'] for package in locked if package['name'] not in prepare.PACKAGES},
+                         {'ubus-testkit': '0.1.0', 'ubus-libubox-sys': '0.1.0'})
 
 
 class UploadIdentityTest(unittest.TestCase):
