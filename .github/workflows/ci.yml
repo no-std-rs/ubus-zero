@@ -55,6 +55,7 @@ jobs:
 
       - name: Inspect publishable packages
         run: |
+          python3 scripts/prepare-release.py "ubus-zero-v$(cat version.txt)"
           python3 scripts/check-public-packages.py
           test "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ubus-zero") | .targets[] | select(.kind == ["lib"]) | .name')" = "ubus"
           cargo package -p ubus-zero --list
