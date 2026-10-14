@@ -1,18 +1,13 @@
 # Changelog
 
-## [0.2.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.1.0...ubus-zero-v0.2.0) (2026-10-13)
-
-
-### Features
-
-* configure crates.io publishing through Runl ([#14](https://github.com/no-std-rs/ubus-zero/issues/14)) ([9fde60d](https://github.com/no-std-rs/ubus-zero/commit/9fde60dbcd05d147f1248e30b36fe0af4c3e3f5e))
-
 All notable changes to `ubus-zero` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-10-13
 
 ### Added
 
@@ -42,5 +37,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Differential compatibility suite backed by a private Rust broker and pinned
   OpenWrt reference builds.
 
-[Unreleased]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.1.0...HEAD
+[Unreleased]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...HEAD
+[0.2.0]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.1.0...ubus-zero-v0.2.0
 [0.1.0]: https://github.com/no-std-rs/ubus-zero/releases/tag/ubus-zero-v0.1.0
