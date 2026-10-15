@@ -25,7 +25,9 @@ use esp_hal::{
     time::Rate,
     timer::timg::TimerGroup,
 };
-use esp_radio::wifi::{sta::StationConfig, Config as WifiConfig, Interface, WifiController};
+use esp_radio::wifi::{
+    sta::StationConfig, AuthenticationMethod, Config as WifiConfig, Interface, WifiController,
+};
 use log::{info, warn};
 use reqwless::{
     client::HttpClient,
@@ -35,14 +37,12 @@ use reqwless::{
 use static_cell::StaticCell;
 use ubus::BlobMsgTable;
 use ubus_router_display::{
+    config::{self, DeviceConfig},
     panel, render,
     rpc::{self, Client, Error},
     stats::{Board, Counters, Dashboard, RateTracker, System, Wan, Wifi},
 };
 
-const WIFI_SSID: &str = env!("WIFI_SSID", "Source config.sh before building");
-const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD", "Source config.sh before building");
-const UBUS_PASSWORD: &str = env!("UBUS_PASSWORD", "Source config.sh before building");
 macro_rules! env_or {
     ($name:literal, $default:literal) => {
         match option_env!($name) {
@@ -51,20 +51,50 @@ macro_rules! env_or {
         }
     };
 }
-const UBUS_URL: &str = env_or!("UBUS_URL", "http://192.168.8.1:8080/ubus");
-const UBUS_USERNAME: &str = env_or!("UBUS_USERNAME", "dashboard");
-const WAN_INTERFACE: &str = env_or!("WAN_INTERFACE", "wan");
-const WIFI_DEVICE: &str = env_or!("WIFI_DEVICE", "");
+
+fn build_settings() -> Option<DeviceConfig> {
+    let config = DeviceConfig {
+        wifi_ssid: option_env!("WIFI_SSID")?.into(),
+        wifi_password: option_env!("WIFI_PASSWORD")?.into(),
+        ubus_password: option_env!("UBUS_PASSWORD")?.into(),
+        ubus_url: env_or!("UBUS_URL", "http://192.168.8.1:8080/ubus").into(),
+        ubus_username: env_or!("UBUS_USERNAME", "dashboard").into(),
+        wan_interface: env_or!("WAN_INTERFACE", "wan").into(),
+        wifi_device: env_or!("WIFI_DEVICE", "").into(),
+    };
+    config.validate().ok()?;
+    Some(config)
+}
+
+fn flash_settings(peripheral: esp_hal::peripherals::FLASH<'static>) -> Option<DeviceConfig> {
+    use embedded_storage::ReadStorage;
+    use esp_bootloader_esp_idf::partitions::{read_partition_table, PARTITION_TABLE_MAX_LEN};
+    let mut flash = esp_storage::FlashStorage::new(peripheral);
+    let mut table = [0; PARTITION_TABLE_MAX_LEN];
+    let table = read_partition_table(&mut flash, &mut table).ok()?;
+    let partition = table.iter().find(|p| {
+        p.label().starts_with(b"dashboard\0")
+            && p.raw_type() == 1
+            && p.raw_subtype() == 0x06
+            && p.offset() == config::FLASH_OFFSET
+            && p.len() >= config::SECTOR_SIZE as u32
+    })?;
+    let mut sector = [0; config::SECTOR_SIZE];
+    flash.read(partition.offset(), &mut sector).ok()?;
+    config::decode_sector(&sector).ok()
+}
 
 type Shared = Mutex<CriticalSectionRawMutex, Dashboard>;
 static STATE: StaticCell<Shared> = StaticCell::new();
 static NET: StaticCell<StackResources<4>> = StaticCell::new();
 static PIXELS: StaticCell<[Rgb565; panel::WIDTH * panel::TILE_ROWS]> = StaticCell::new();
+static CONFIG: StaticCell<DeviceConfig> = StaticCell::new();
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
 struct Http {
     stack: Stack<'static>,
+    url: &'static str,
 }
 
 fn http_error(e: reqwless::Error) -> Error {
@@ -82,7 +112,7 @@ impl Http {
         let mut http = HttpClient::new(&tcp, &dns);
         let len = {
             let mut request = http
-                .request(Method::POST, UBUS_URL)
+                .request(Method::POST, self.url)
                 .await
                 .map_err(http_error)?
                 .content_type(ContentType::ApplicationJson)
@@ -111,10 +141,6 @@ impl rpc::Http for Http {
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     esp_println::logger::init_logger_from_env();
-    assert!(
-        UBUS_URL.starts_with("http://"),
-        "This LAN example requires an http:// ubus URL"
-    );
     let p = esp_hal::init(esp_hal::Config::default().with_cpu_clock(CpuClock::max()));
     esp_alloc::heap_allocator!(size: 96 * 1024);
     let timers = TimerGroup::new(p.TIMG0);
@@ -151,6 +177,19 @@ async fn main(spawner: Spawner) -> ! {
     delay.delay_millis(400);
     let _ = touch.write(0x15, &[0xFE, 1]); // Keep scanning while idle.
 
+    let pixels = PIXELS.init([Rgb565::BLACK; panel::WIDTH * panel::TILE_ROWS]);
+    let Some(config) = flash_settings(p.FLASH).or_else(build_settings) else {
+        info!("Setup required: use the public USB flasher to configure this device");
+        for y in (0..240).step_by(panel::TILE_ROWS) {
+            render::setup(&mut panel::Tile { y, pixels }).unwrap();
+            panel.write_tile(y, pixels).unwrap();
+        }
+        loop {
+            Timer::after(Duration::from_secs(60)).await;
+        }
+    };
+    let config = &*CONFIG.init(config);
+
     let state = STATE.init(Mutex::new(Dashboard::default()));
     let (controller, interfaces) = esp_radio::wifi::new(p.WIFI, Default::default()).unwrap();
     let mut seed = [0u8; 8];
@@ -161,11 +200,10 @@ async fn main(spawner: Spawner) -> ! {
         NET.init(StackResources::new()),
         u64::from_le_bytes(seed),
     );
-    spawner.spawn(wifi_connection(controller).unwrap());
+    spawner.spawn(wifi_connection(controller, config).unwrap());
     spawner.spawn(network(runner).unwrap());
-    spawner.spawn(poll_router(stack, state).unwrap());
+    spawner.spawn(poll_router(stack, state, config).unwrap());
 
-    let pixels = PIXELS.init([Rgb565::BLACK; panel::WIDTH * panel::TILE_ROWS]);
     let mut page = 0;
     let mut page_since = Instant::now();
     let mut frame_at = Instant::now();
@@ -208,12 +246,20 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn wifi_connection(mut controller: WifiController<'static>) -> ! {
+async fn wifi_connection(
+    mut controller: WifiController<'static>,
+    config: &'static DeviceConfig,
+) -> ! {
     controller
         .set_config(&WifiConfig::Station(
             StationConfig::default()
-                .with_ssid(WIFI_SSID)
-                .with_password(WIFI_PASSWORD.into()),
+                .with_ssid(config.wifi_ssid.as_str())
+                .with_auth_method(if config.wifi_password.is_empty() {
+                    AuthenticationMethod::None
+                } else {
+                    AuthenticationMethod::Wpa2Personal
+                })
+                .with_password(config.wifi_password.clone()),
         ))
         .unwrap();
     loop {
@@ -235,11 +281,22 @@ async fn network(mut runner: Runner<'static, Interface<'static>>) -> ! {
 }
 
 #[embassy_executor::task]
-async fn poll_router(stack: Stack<'static>, shared: &'static Shared) -> ! {
-    let mut client = Client::new(Http { stack }, UBUS_USERNAME, UBUS_PASSWORD);
+async fn poll_router(
+    stack: Stack<'static>,
+    shared: &'static Shared,
+    config: &'static DeviceConfig,
+) -> ! {
+    let mut client = Client::new(
+        Http {
+            stack,
+            url: config.ubus_url.as_str(),
+        },
+        config.ubus_username.as_str(),
+        config.ubus_password.as_str(),
+    );
     let mut state = Dashboard::default();
     let mut tracker = RateTracker::default();
-    let object = alloc::format!("network.interface.{WAN_INTERFACE}");
+    let object = alloc::format!("network.interface.{}", config.wan_interface);
     let mut iteration = 0u32;
     loop {
         if !stack.is_config_up() {
@@ -252,7 +309,16 @@ async fn poll_router(stack: Stack<'static>, shared: &'static Shared) -> ! {
         }
         stack.wait_config_up().await;
         let start = Instant::now();
-        match sample(&mut client, &object, &mut state, &mut tracker, iteration).await {
+        match sample(
+            &mut client,
+            &object,
+            &mut state,
+            &mut tracker,
+            iteration,
+            &config.wifi_device,
+        )
+        .await
+        {
             Ok(()) => state.error = None,
             Err(e) => {
                 warn!("Router sample failed: {e:?}");
@@ -273,6 +339,7 @@ async fn sample(
     state: &mut Dashboard,
     tracker: &mut RateTracker,
     iteration: u32,
+    wifi_device: &str,
 ) -> Result<(), Error> {
     let empty = BlobMsgTable::empty();
     state.system = System::parse(&client.call("system", "info", &empty).await?);
@@ -321,10 +388,10 @@ async fn sample(
             state.board = Board::parse(&reply);
         }
     }
-    if !WIFI_DEVICE.is_empty() && iteration.is_multiple_of(5) {
+    if !wifi_device.is_empty() && iteration.is_multiple_of(5) {
         state.wifi = None;
         state.wifi_error = None;
-        let args = BlobMsgTable::build(|b| b.put_str(Some("device"), WIFI_DEVICE));
+        let args = BlobMsgTable::build(|b| b.put_str(Some("device"), wifi_device));
         match client.call("iwinfo", "info", &args).await {
             Ok(reply) => {
                 let mut wifi = Wifi::parse(&reply);

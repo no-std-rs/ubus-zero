@@ -24,11 +24,13 @@ firmware = [
     "dep:embassy-executor", "dep:embassy-net", "dep:embassy-time",
     "dep:embassy-sync", "dep:embassy-futures", "dep:static_cell", "dep:reqwless", "dep:log",
     "dep:portable-atomic",
+    "dep:esp-storage", "dep:embedded-storage",
 ]
 
 [dependencies]
 ubus = { package = "ubus-zero", path = "../..", default-features = false, features = ["json", "portable-atomic"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 embedded-graphics = "0.8.2"
 embedded-hal = "1"
 
@@ -49,6 +51,8 @@ reqwless = { version = "0.14", default-features = false, optional = true }
 log = { version = "0.4", default-features = false, optional = true }
 # The board is single core and has no atomic compare-and-swap instruction.
 portable-atomic = { version = "1", features = ["unsafe-assume-single-core"], optional = true }
+esp-storage = { version = "0.9", features = ["esp32c3"], optional = true }
+embedded-storage = { version = "0.3", optional = true }
 
 [profile.dev]
 opt-level = "s"

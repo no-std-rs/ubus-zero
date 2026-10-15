@@ -10,3 +10,48 @@ releases:
     include_v_in_tag: true
     tag_separator: "-"
     bump_minor_pre_major: true
+
+# Runnerless copies this verified main-branch Actions artifact to its public
+# artifact store. Keep one complete main set until its replacement is published.
+automations:
+  - id: router-display
+    triggers:
+      - id: firmware-build
+        uses: github.workflow-run@v1
+        with:
+          event: github.workflow_run
+          conclusions: [success]
+          targets:
+            - default_branch: {}
+          workflow:
+            path: .github/workflows/firmware.yml
+    sources:
+      - id: firmware-files
+        uses: github.workflow-artifacts@v1
+        with:
+          run: "{{ triggers.firmware-build.run }}"
+          artifacts:
+            - name: router-display-firmware
+              max_bytes: 8388608
+              unpack: true
+              files:
+                - name: router-display.bin
+                  media_type: application/octet-stream
+                  max_bytes: 4194304
+                - name: latest.json
+                  media_type: application/json
+                  max_bytes: 8192
+                - name: manifest.json
+                  media_type: application/json
+                  max_bytes: 8192
+                - name: SHA256SUMS
+                  media_type: text/plain
+                  max_bytes: 4096
+    actions:
+      - id: publish-firmware
+        uses: toolkit.public-folder@v1
+        with:
+          source: firmware-files
+          security_profile: untrusted-data
+          retention: 365d
+          keep_default_branch_sets: 1

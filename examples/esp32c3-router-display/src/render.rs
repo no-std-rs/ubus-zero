@@ -98,6 +98,16 @@ pub fn megabits(bytes_per_second: u64) -> String {
     format!("{}.{:02} Mb/s", hundredths / 100, hundredths % 100)
 }
 
+pub fn setup<D: DrawTarget<Color = Rgb565>>(d: &mut D) -> Result<(), D::Error> {
+    d.clear(BACKGROUND)?;
+    center(d, "UBUS ZERO", 55, PINK)?;
+    center(d, "SETUP REQUIRED", 92, WHITE)?;
+    center(d, "Open the USB flasher", 119, MUTED)?;
+    center(d, "on your computer.", 136, MUTED)?;
+    center(d, "Enter Wi-Fi and router", 162, WHITE)?;
+    center(d, "settings, then install.", 179, WHITE)
+}
+
 fn bytes(n: Option<u64>) -> String {
     match n {
         Some(n) if n >= 1024 * 1024 * 1024 => format!(
