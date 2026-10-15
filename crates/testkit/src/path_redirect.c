@@ -29,9 +29,11 @@
 #include <glob.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 /* Return PATH unchanged unless the first configured prefix matches it. */
 static const char *rewrite(const char *path, char *buf, size_t buflen) {
@@ -84,8 +86,219 @@ static const char *rewrite(const char *path, char *buf, size_t buflen) {
 }
 
 static int open_needs_mode(int flags) {
-    return (flags & O_CREAT) || (flags & O_TMPFILE);
+    return (flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE;
 }
+
+/* rpcd file.write already fsyncs its opened file, then invokes the process-
+ * global sync(). The latter waits on every unrelated filesystem on the CI
+ * host, defeating fixture isolation and occasionally exceeding the RPC
+ * deadline. Opt in only for rpcd's private root: preserve the real fsync and
+ * its result, and omit a subsequent global flush only after that fsync
+ * succeeded on a descriptor inside the fixture. Other sync calls pass through.
+ */
+static int private_file_synced;
+
+int fsync(int fd) {
+    static int (*real)(int);
+    if (!real) real = dlsym(RTLD_NEXT, "fsync");
+    if (!real) { errno = ENOSYS; return -1; }
+    int result = real(fd);
+    int saved_errno = errno;
+    private_file_synced = 0;
+    const char *root = getenv("UBUS_TESTKIT_RPCD_SYNC_ROOT");
+    if (result == 0 && root && *root) {
+        char proc[64], path[PATH_MAX];
+        snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
+        ssize_t size = readlink(proc, path, sizeof(path) - 1);
+        if (size >= 0 && (size_t)size < sizeof(path) - 1) {
+            path[size] = '\0';
+            size_t length = strlen(root);
+            private_file_synced = !strncmp(path, root, length) &&
+                (path[length] == '/' || path[length] == '\0');
+        }
+    }
+    errno = saved_errno;
+    return result;
+}
+
+void sync(void) {
+    static void (*real)(void);
+    const char *root = getenv("UBUS_TESTKIT_RPCD_SYNC_ROOT");
+    if (private_file_synced && root && *root) {
+        private_file_synced = 0;
+        return;
+    }
+    private_file_synced = 0;
+    if (!real) real = dlsym(RTLD_NEXT, "sync");
+    if (real) real();
+}
+
+/* ---- stdio, mutations, and canonicalization used by libuci/rpcd. ----- */
+
+#define RESOLVE_REAL(name) \
+    if (!real) { \
+        real = (__typeof__(real))dlsym(RTLD_NEXT, #name); \
+        if (!real) { errno = ENOSYS; return -1; } \
+    }
+
+FILE *fopen(const char *path, const char *mode) {
+    static FILE *(*real)(const char *, const char *);
+    char buf[PATH_MAX];
+    if (!real) real = dlsym(RTLD_NEXT, "fopen");
+    if (!real) { errno = ENOSYS; return NULL; }
+    return real(rewrite(path, buf, sizeof(buf)), mode);
+}
+
+FILE *fopen64(const char *path, const char *mode) {
+    static FILE *(*real)(const char *, const char *);
+    char buf[PATH_MAX];
+    if (!real) real = dlsym(RTLD_NEXT, "fopen64");
+    if (!real) { errno = ENOSYS; return NULL; }
+    return real(rewrite(path, buf, sizeof(buf)), mode);
+}
+
+void *dlopen(const char *path, int flags) {
+    static void *(*real)(const char *, int);
+    char buf[PATH_MAX];
+    if (!real) real = dlsym(RTLD_NEXT, "dlopen");
+    if (!real) return NULL;
+    return real(rewrite(path, buf, sizeof(buf)), flags);
+}
+
+int mkdir(const char *path, mode_t mode) {
+    static int (*real)(const char *, mode_t);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(mkdir);
+    return real(rewrite(path, buf, sizeof(buf)), mode);
+}
+
+int mkdirat(int dirfd, const char *path, mode_t mode) {
+    static int (*real)(int, const char *, mode_t);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(mkdirat);
+    return real(dirfd, rewrite(path, buf, sizeof(buf)), mode);
+}
+
+int chmod(const char *path, mode_t mode) {
+    static int (*real)(const char *, mode_t);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(chmod);
+    return real(rewrite(path, buf, sizeof(buf)), mode);
+}
+
+int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
+    static int (*real)(int, const char *, mode_t, int);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(fchmodat);
+    return real(dirfd, rewrite(path, buf, sizeof(buf)), mode, flags);
+}
+
+#define ONE_PATH_MUTATION(name) \
+int name(const char *path) { \
+    static int (*real)(const char *); \
+    char buf[PATH_MAX]; \
+    RESOLVE_REAL(name); \
+    return real(rewrite(path, buf, sizeof(buf))); \
+}
+
+ONE_PATH_MUTATION(unlink)
+ONE_PATH_MUTATION(rmdir)
+
+int unlinkat(int dirfd, const char *path, int flags) {
+    static int (*real)(int, const char *, int);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(unlinkat);
+    return real(dirfd, rewrite(path, buf, sizeof(buf)), flags);
+}
+
+int rename(const char *from, const char *to) {
+    static int (*real)(const char *, const char *);
+    char from_buf[PATH_MAX], to_buf[PATH_MAX];
+    RESOLVE_REAL(rename);
+    return real(rewrite(from, from_buf, sizeof(from_buf)),
+                rewrite(to, to_buf, sizeof(to_buf)));
+}
+
+int renameat(int from_dirfd, const char *from, int to_dirfd, const char *to) {
+    static int (*real)(int, const char *, int, const char *);
+    char from_buf[PATH_MAX], to_buf[PATH_MAX];
+    RESOLVE_REAL(renameat);
+    return real(from_dirfd, rewrite(from, from_buf, sizeof(from_buf)),
+                to_dirfd, rewrite(to, to_buf, sizeof(to_buf)));
+}
+
+ssize_t readlink(const char *path, char *target, size_t size) {
+    static ssize_t (*real)(const char *, char *, size_t);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(readlink);
+    return real(rewrite(path, buf, sizeof(buf)), target, size);
+}
+
+ssize_t readlinkat(int dirfd, const char *path, char *target, size_t size) {
+    static ssize_t (*real)(int, const char *, char *, size_t);
+    char buf[PATH_MAX];
+    RESOLVE_REAL(readlinkat);
+    return real(dirfd, rewrite(path, buf, sizeof(buf)), target, size);
+}
+
+char *realpath(const char *path, char *resolved) {
+    static char *(*real)(const char *, char *);
+    char buf[PATH_MAX];
+    if (!real) real = dlsym(RTLD_NEXT, "realpath");
+    if (!real) { errno = ENOSYS; return NULL; }
+    return real(rewrite(path, buf, sizeof(buf)), resolved);
+}
+
+/* libuci creates a temporary config beside the original and renames it.
+ * Keep the caller's logical prefix (its buffer may be much shorter than
+ * the redirected path), copying back only the six randomized characters.
+ */
+static void copy_random_suffix(char *logical, const char *actual, int suffix) {
+    size_t logical_len = strlen(logical), actual_len = strlen(actual);
+    size_t tail = (size_t)suffix + 6;
+    if (suffix >= 0 && logical_len >= tail && actual_len >= tail)
+        memcpy(logical + logical_len - tail, actual + actual_len - tail, 6);
+}
+
+#define MKSTEMP_WRAPPER(name) \
+int name(char *template) { \
+    static int (*real)(char *); \
+    char buf[PATH_MAX]; \
+    const char *mapped = rewrite(template, buf, sizeof(buf)); \
+    RESOLVE_REAL(name); \
+    int fd = real(mapped == template ? template : buf); \
+    if (fd >= 0 && mapped != template) copy_random_suffix(template, buf, 0); \
+    return fd; \
+}
+
+MKSTEMP_WRAPPER(mkstemp)
+MKSTEMP_WRAPPER(mkstemp64)
+
+#define MKSTEMPS_WRAPPER(name) \
+int name(char *template, int suffix) { \
+    static int (*real)(char *, int); \
+    char buf[PATH_MAX]; \
+    const char *mapped = rewrite(template, buf, sizeof(buf)); \
+    RESOLVE_REAL(name); \
+    int fd = real(mapped == template ? template : buf, suffix); \
+    if (fd >= 0 && mapped != template) copy_random_suffix(template, buf, suffix); \
+    return fd; \
+}
+
+MKSTEMPS_WRAPPER(mkstemps)
+MKSTEMPS_WRAPPER(mkstemps64)
+
+int mkostemp(char *template, int flags) {
+    static int (*real)(char *, int);
+    char buf[PATH_MAX];
+    const char *mapped = rewrite(template, buf, sizeof(buf));
+    RESOLVE_REAL(mkostemp);
+    int fd = real(mapped == template ? template : buf, flags);
+    if (fd >= 0 && mapped != template) copy_random_suffix(template, buf, 0);
+    return fd;
+}
+
+#undef RESOLVE_REAL
 
 /* ---- opens and directory discovery. ---------------------------------- */
 
@@ -148,7 +361,7 @@ int open64(const char *path, int flags, ...) {
 int openat(int dirfd, const char *path, int flags, ...) {
     static real_openat_t real;
     char buf[PATH_MAX];
-    const char *rewritten = path && path[0] == '/'
+    const char *rewritten = path[0] == '/'
                                ? rewrite(path, buf, sizeof(buf))
                                : path;
 
@@ -173,7 +386,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
 int openat64(int dirfd, const char *path, int flags, ...) {
     static real_openat_t real;
     char buf[PATH_MAX];
-    const char *rewritten = path && path[0] == '/'
+    const char *rewritten = path[0] == '/'
                                ? rewrite(path, buf, sizeof(buf))
                                : path;
 

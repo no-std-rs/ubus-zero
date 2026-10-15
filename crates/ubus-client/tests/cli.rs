@@ -19,22 +19,33 @@ use ubus::{
     wire::MsgType,
     BlobMsgTable, Transport, UbusObject,
 };
-use ubus_testkit::{skip, TapDirection, UbusdHarness, WireTap};
+use ubus_testkit::{
+    skip, RpcdHarness, TapDirection, UbusCli, UbusdHarness, WireTap, RPCD_LOGIN_READONLY,
+    RPCD_TEST_PASSWORD,
+};
 
-fn brokers(test: &str, body: impl Fn(&str)) {
-    for rust in [false, true] {
-        let harness = if rust {
-            UbusdHarness::start_rust()
-        } else {
-            UbusdHarness::start_upstream()
+fn brokers(test: &str, body: impl Fn(&str) + Sync) {
+    // Both fixtures own independent sockets and child environments. Running
+    // them together lets the normal test pool cover the full consumer matrix
+    // without serializing the Rust and upstream halves of every scenario.
+    std::thread::scope(|scope| {
+        for rust in [false, true] {
+            let body = &body;
+            scope.spawn(move || {
+                let harness = if rust {
+                    UbusdHarness::start_rust()
+                } else {
+                    UbusdHarness::start_upstream()
+                }
+                .unwrap();
+                let Some(harness) = harness else {
+                    skip::or_skip(test, "broker unavailable");
+                    return;
+                };
+                body(harness.socket_path().to_str().unwrap());
+            });
         }
-        .unwrap();
-        let Some(harness) = harness else {
-            skip::or_skip(test, "broker unavailable");
-            continue;
-        };
-        body(harness.socket_path().to_str().unwrap());
-    }
+    });
 }
 
 fn cli(socket: &str, args: &[&str]) -> Command {
@@ -328,6 +339,157 @@ fn waiting_and_shell_provider_work_with_both_brokers() {
                 .unwrap(),
         );
         assert_eq!(missing.status.code(), Some(7));
+    });
+}
+
+#[test]
+fn upstream_cli_calls_the_shipped_shell_provider() {
+    brokers("cli upstream consumer", |socket| {
+        let Some(upstream) = UbusCli::locate() else {
+            skip::or_skip("cli upstream consumer", "upstream ubus CLI unavailable");
+            return;
+        };
+        let provider = cli(
+            socket,
+            &["-n", "2", "serve", "example.cross", "echo", "--", "cat"],
+        )
+        .spawn()
+        .unwrap();
+        success(socket, &["-t", "3", "wait_for", "example.cross"]);
+        let value = json!({"unicode":"Zażółć 🦀", "nested":{"flags":[true,false], "values":[-42,2147483648i64,1.25]}, "empty":{}});
+        let output = upstream
+            .run(
+                std::path::Path::new(socket),
+                &[
+                    "-t",
+                    "3",
+                    "call",
+                    "example.cross",
+                    "echo",
+                    &value.to_string(),
+                ],
+            )
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            value
+        );
+        assert_eq!(
+            success(
+                socket,
+                &["call", "example.cross", "echo", "{\"caller\":\"rust\"}"]
+            ),
+            json!({"caller":"rust"})
+        );
+        assert!(wait(provider).status.success());
+        let absent = wait(cli(socket, &["list", "example.cross"]).spawn().unwrap());
+        assert_eq!(absent.status.code(), Some(4));
+        assert!(absent.stdout.is_empty());
+    });
+}
+
+#[test]
+fn real_rpcd_sessions_and_error_statuses() {
+    brokers("cli rpcd", |socket| {
+        let Some(rpcd) = RpcdHarness::start(std::path::Path::new(socket), &[]).unwrap() else {
+            skip::or_skip("cli rpcd", "upstream rpcd unavailable");
+            return;
+        };
+        let login = success(
+            socket,
+            &[
+                "call",
+                "session",
+                "login",
+                &json!({"username":RPCD_LOGIN_READONLY, "password":RPCD_TEST_PASSWORD}).to_string(),
+            ],
+        );
+        let sid = login["ubus_rpc_session"].as_str().unwrap();
+        assert_eq!(sid.len(), 32);
+        assert_eq!(login["data"]["username"], RPCD_LOGIN_READONLY);
+        let values =
+            json!({"nested":{"unicode":"üñî", "array":[true,7,1.25]}, "text":"line\nnext"});
+        let args = json!({"ubus_rpc_session":sid, "values":values});
+        let output = wait(
+            cli(socket, &["call", "session", "set", &args.to_string()])
+                .spawn()
+                .unwrap(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        let args = json!({"ubus_rpc_session":sid, "keys":["nested", "text"]});
+        assert_eq!(
+            success(socket, &["call", "session", "get", &args.to_string()]),
+            json!({"values":values})
+        );
+        let denied = wait(
+            cli(
+                socket,
+                &[
+                    "call",
+                    "session",
+                    "login",
+                    "{\"username\":\"ro\",\"password\":\"wrong\"}",
+                ],
+            )
+            .spawn()
+            .unwrap(),
+        );
+        assert_eq!(denied.status.code(), Some(6));
+        assert!(denied.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains('6'));
+
+        let mut child = cli(socket, &["batch"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(
+            b"{\"id\":\"bad-method\",\"command\":\"call\",\"object\":\"session\",\"method\":\"absent\"}\n{\"id\":\"still-connected\",\"command\":\"ping\"}\n"
+        ).unwrap();
+        let output = wait(child);
+        assert_eq!(output.status.code(), Some(1));
+        let responses: Vec<Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses[0]["id"], "bad-method");
+        assert_eq!(responses[0]["status"], 3);
+        assert_eq!(
+            responses[1],
+            json!({"id":"still-connected", "ok":true, "result":[{"ok":true}]})
+        );
+        drop(rpcd);
+    });
+}
+
+#[test]
+fn concurrent_large_cli_calls_keep_replies_correlated() {
+    brokers("cli concurrent large calls", |socket| {
+        let _owner = Owner::start(socket);
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                scope.spawn(move || {
+                    // Larger than socket/read scratch buffers but below the
+                    // per-argument exec limit on Linux.
+                    let payload = json!({"worker":worker, "text":"üx".repeat(16_384), "nested":{"array":[true,-1,2147483648i64]}});
+                    for request in 0..3 {
+                        let mut args = payload.clone();
+                        args["request"] = json!(request);
+                        assert_eq!(success(socket, &["-t", "5", "call", "example.echo", "echo", &args.to_string()]), args);
+                    }
+                });
+            }
+        });
     });
 }
 

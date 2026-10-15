@@ -24,7 +24,7 @@ use rustix::fd::{AsFd, AsRawFd, OwnedFd};
 use rustix::io::Errno;
 use rustix::io::{IoSlice, IoSliceMut};
 use rustix::net::{
-    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendAncillaryMessage, SendFlags, SocketAddrUnix,
 };
 
@@ -33,7 +33,7 @@ use ubus::error::UbusError;
 use ubus::wire::{Codec, Frame};
 
 use crate::acl::{apply_reload, AclRegistry};
-use crate::peer::{Peer, MAX_RX_BUF_BYTES, MAX_TX_BUF_BYTES};
+use crate::peer::{Peer, MAX_RX_BUF_BYTES, MAX_TX_BUF_BYTES, RX_FD_WINDOW};
 #[cfg(feature = "testing")]
 use crate::registry::FIRST_PEER_ID;
 use crate::registry::{
@@ -438,20 +438,27 @@ impl Broker {
                         continue;
                     }
                     #[cfg(target_os = "linux")]
-                    let (uid, user, group) = match credentials {
-                        PeerCredentials::Resolved { uid, user, group } => {
-                            (Some(uid), Some(user), Some(group))
-                        }
-                        PeerCredentials::ResolutionFailed => (None, None, None),
+                    let (uid, gid, user, group, extra_gids) = match credentials {
+                        PeerCredentials::Resolved {
+                            uid,
+                            gid,
+                            user,
+                            group,
+                            extra_gids,
+                        } => (Some(uid), Some(gid), Some(user), Some(group), extra_gids),
+                        PeerCredentials::ResolutionFailed => (None, None, None, None, Vec::new()),
                     };
                     #[cfg(not(target_os = "linux"))]
-                    let (uid, user, group) = {
+                    let (uid, gid, user, group, extra_gids) = {
                         let _ = credentials;
-                        (None, None, None)
+                        (None, None, None, None, Vec::new())
                     };
                     #[cfg(feature = "testing")]
                     let uid = peer_uid_override.or(uid);
-                    match self.peers.insert(Peer::new(fd, uid, user, group)) {
+                    let mut peer = Peer::new(fd, uid, user, group);
+                    peer.gid = gid;
+                    peer.extra_gids = extra_gids;
+                    match self.peers.insert(peer) {
                         Ok((id, _)) => {
                             log::debug!("ubusd: accepted peer {id}");
                             // Match upstream `ubusd`: push HELLO unsolicited
@@ -515,6 +522,13 @@ impl Broker {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             close = !read_into_buf(peer, peer_id);
             loop {
+                // A socket frame always has a four-byte outer blob header.
+                // The codec also supports standalone eight-byte headers for
+                // in-memory callers; do not mistake a fragmented wire header
+                // for such a complete frame.
+                if peer.rx_buf.len() < RX_FD_WINDOW {
+                    break;
+                }
                 // Frame-size parity rides the codec's MAX_MSG_LEN check:
                 // upstream accepts attr_len <= 1 MiB and closes above.
                 match Codec::read_frame_lenient_version(&peer.rx_buf) {
@@ -1037,6 +1051,31 @@ fn tx_send_window(sent_abs: usize, chunk_len: usize, next_fd_abs: Option<usize>)
     }
 }
 
+/// Peek without consuming, returning the length only if every peeked byte is
+/// descriptor-free. SCM_RIGHTS received under MSG_PEEK are fresh duplicates:
+/// explicitly close all of them, including the visible part of a truncated cmsg.
+fn peek_descriptor_free_bytes(fd: &OwnedFd, bytes: &mut [u8]) -> Result<Option<usize>, Errno> {
+    let mut iov = [IoSliceMut::new(bytes)];
+    let mut storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut control = RecvAncillaryBuffer::new(&mut storage);
+    let received = rustix::net::recvmsg(
+        fd,
+        &mut iov,
+        &mut control,
+        RecvFlags::PEEK | RecvFlags::CMSG_CLOEXEC,
+    )?;
+    let mut ancillary = received.flags.contains(ReturnFlags::CTRUNC);
+    for message in control.drain() {
+        ancillary = true;
+        if let RecvAncillaryMessage::ScmRights(fds) = message {
+            for fd in fds {
+                drop(fd);
+            }
+        }
+    }
+    Ok((!ancillary).then_some(received.bytes))
+}
+
 /// Read everything currently queued on `peer.fd` into `peer.rx_buf`.
 /// Returns `false` if the peer hung up — caller schedules a close.
 fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
@@ -1050,10 +1089,59 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
         }
     };
     let mut tmp = [0u8; 4096];
+    let mut frame_start = 0;
     loop {
-        let mut iov = [IoSliceMut::new(&mut tmp)];
+        // This socket has a single reader. Bytes proven descriptor-free by
+        // MSG_PEEK cannot change before consumption; appended fd-bearing
+        // bytes remain queued beyond that exact prefix. Ordinary traffic can
+        // therefore retain the original multi-frame batching behavior.
+        let batch = match peek_descriptor_free_bytes(fd, &mut tmp) {
+            Ok(Some(0)) => return false,
+            Ok(batch) => batch,
+            Err(Errno::AGAIN) => return true,
+            Err(Errno::INTR) => continue,
+            Err(e) => {
+                log::warn!("ubusd: peer {peer_id} recv peek failed: {e:?}");
+                return false;
+            }
+        };
+        let (read_len, frame_abs, capture_fd) = if let Some(batch) = batch {
+            (batch, 0, false)
+        } else {
+            // SCM_RIGHTS is a barrier at the END of a stream read: recvmsg
+            // may return preceding plain bytes together with the fd. Once a
+            // peek finds ancillary data, locate the partial frame and bound
+            // every read to its header/body, matching upstream's fd window.
+            let (remaining, header) = loop {
+                let available = peer.rx_buf.len() - frame_start;
+                if available < RX_FD_WINDOW {
+                    break (RX_FD_WINDOW - available, true);
+                }
+                let prefix = &peer.rx_buf[frame_start + 8..frame_start + 12];
+                let raw_len =
+                    (u32::from_be_bytes(prefix.try_into().unwrap()) & 0x00ff_ffff) as usize;
+                if !(4..=ubus::wire::MAX_MSG_LEN).contains(&raw_len) {
+                    // Leave invalid framing to the decoder, which closes the peer.
+                    return true;
+                }
+                let frame_len = ubus::wire::HEADER_SIZE + ubus::blob::align4(raw_len);
+                if available >= frame_len {
+                    frame_start += frame_len;
+                    continue;
+                }
+                break (frame_len - available, false);
+            };
+            let frame_abs = peer.rx_abs.saturating_add(frame_start);
+            let capture_fd = header && !peer.rx_fds.iter().any(|(at, _)| *at == frame_abs);
+            (remaining.min(tmp.len()), frame_abs, capture_fd)
+        };
+        let mut iov = [IoSliceMut::new(&mut tmp[..read_len])];
         let mut control_storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
-        let mut control = RecvAncillaryBuffer::new(&mut control_storage);
+        // Upstream reads the body without an ancillary buffer, and disables
+        // further fd reception once this frame already owns one. The kernel
+        // closes discarded descriptors in both cases.
+        let control_len = if capture_fd { control_storage.len() } else { 0 };
+        let mut control = RecvAncillaryBuffer::new(&mut control_storage[..control_len]);
         match rustix::net::recvmsg(fd, &mut iov, &mut control, RecvFlags::CMSG_CLOEXEC) {
             Ok(received) if received.bytes == 0 => return false,
             Ok(received) => {
@@ -1068,12 +1156,7 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
                     }
                 }
                 if let Some(received_fd) = received_fd {
-                    // AF_UNIX SOCK_STREAM never returns bytes across an
-                    // ancillary boundary, so this fd belongs to the byte
-                    // that starts this chunk — not to whatever frame the
-                    // dispatcher happens to decode first.
-                    let abs = peer.rx_abs.saturating_add(peer.rx_buf.len());
-                    Peer::push_rx_fd(&mut peer.rx_fds, abs, received_fd);
+                    Peer::push_rx_fd(&mut peer.rx_fds, frame_abs, received_fd);
                 }
                 // Pre-check before extend: a hostile peer firehosing
                 // bytes faster than the dispatch can drain shouldn't
@@ -1101,8 +1184,10 @@ enum PeerCredentials {
     #[cfg(target_os = "linux")]
     Resolved {
         uid: u32,
+        gid: u32,
         user: String,
         group: String,
+        extra_gids: Vec<u32>,
     },
     #[cfg(target_os = "linux")]
     ResolutionFailed,
@@ -1139,7 +1224,7 @@ fn accept_peer_credentials(credentials: &PeerCredentials, has_peer_uid_override:
 fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
     #[cfg(target_os = "linux")]
     {
-        let Some((uid, gid)) = socket_peer_ids(fd) else {
+        let Some((uid, gid, pid)) = socket_peer_ids(fd) else {
             return PeerCredentials::ResolutionFailed;
         };
         let Some(user) = user_name(uid) else {
@@ -1148,7 +1233,13 @@ fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
         let Some(group) = group_name(gid) else {
             return PeerCredentials::ResolutionFailed;
         };
-        PeerCredentials::Resolved { uid, user, group }
+        PeerCredentials::Resolved {
+            uid,
+            gid,
+            user,
+            group,
+            extra_gids: supplementary_gids(pid),
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1158,7 +1249,7 @@ fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
 }
 
 #[cfg(target_os = "linux")]
-fn socket_peer_ids(fd: &OwnedFd) -> Option<(libc::uid_t, libc::gid_t)> {
+fn socket_peer_ids(fd: &OwnedFd) -> Option<(libc::uid_t, libc::gid_t, libc::pid_t)> {
     let mut cred = std::mem::MaybeUninit::<libc::ucred>::uninit();
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let rc = unsafe {
@@ -1174,7 +1265,53 @@ fn socket_peer_ids(fd: &OwnedFd) -> Option<(libc::uid_t, libc::gid_t)> {
         return None;
     }
     let cred = unsafe { cred.assume_init() };
-    Some((cred.uid, cred.gid))
+    Some((cred.uid, cred.gid, cred.pid))
+}
+
+/// Upstream reads the peer's supplementary groups from its proc status at
+/// accept time, retaining at most 64 groups. Keep libc file I/O so isolated
+/// compatibility children can substitute this one process-local fixture.
+#[cfg(target_os = "linux")]
+fn supplementary_gids(pid: libc::pid_t) -> Vec<u32> {
+    let path = std::ffi::CString::new(format!("/proc/{pid}/status")).expect("numeric proc path");
+    let file = unsafe { libc::fopen(path.as_ptr(), c"r".as_ptr()) };
+    if file.is_null() {
+        return Vec::new();
+    }
+    // A fixed fgets buffer can split a decimal token and grant a different
+    // numeric GID. Read the complete record before applying the group cap.
+    let mut line = std::ptr::null_mut();
+    let mut capacity = 0;
+    let mut groups = Vec::new();
+    loop {
+        // SAFETY: getline owns/reallocates this initially null allocation and
+        // NUL-terminates every successful record. The stream remains open.
+        let read = unsafe { libc::getline(&mut line, &mut capacity, file) };
+        if read < 0 {
+            break;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(line.cast::<u8>(), read as usize) };
+        let Some(rest) = bytes.strip_prefix(b"Groups:") else {
+            continue;
+        };
+        // strtoul mirrors upstream's whitespace, overflow and stopping rules.
+        let mut p = unsafe { line.add(bytes.len() - rest.len()) };
+        while unsafe { *p } != 0 && groups.len() < 64 {
+            let mut end = std::ptr::null_mut();
+            let gid = unsafe { libc::strtoul(p, &mut end, 10) };
+            if std::ptr::eq(p, end) {
+                break;
+            }
+            groups.push(gid as u32);
+            p = end;
+        }
+        break;
+    }
+    unsafe {
+        libc::free(line.cast());
+        libc::fclose(file);
+    }
+    groups
 }
 
 #[cfg(target_os = "linux")]
@@ -1333,8 +1470,10 @@ mod tests {
     fn linux_resolved_credentials_are_accepted() {
         let credentials = PeerCredentials::Resolved {
             uid: 1,
+            gid: 1,
             user: "user".into(),
             group: "group".into(),
+            extra_gids: Vec::new(),
         };
 
         assert!(accept_peer_credentials(&credentials, false));
@@ -1385,5 +1524,96 @@ mod tx_send_window_tests {
     #[test]
     fn no_marker_does_not_clamp() {
         assert_eq!(tx_send_window(100, 40, None), (40, false));
+    }
+}
+
+#[cfg(test)]
+mod rx_peek_tests {
+    use super::*;
+    use rustix::fs::{fcntl_setfl, OFlags};
+    use rustix::net::{socketpair, AddressFamily, SocketFlags, SocketType};
+    use ubus_testkit::pipe;
+
+    fn sockets() -> (OwnedFd, OwnedFd) {
+        socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .expect("socketpair")
+    }
+
+    fn send_rights(socket: &OwnedFd, bytes: &[u8], descriptor: &OwnedFd, count: usize) {
+        let rights = vec![descriptor.as_fd(); count];
+        let mut storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(253))];
+        let mut control = SendAncillaryBuffer::new(&mut storage);
+        assert!(control.push(SendAncillaryMessage::ScmRights(&rights)));
+        assert_eq!(
+            rustix::net::sendmsg(
+                socket,
+                &[IoSlice::new(bytes)],
+                &mut control,
+                SendFlags::empty()
+            )
+            .expect("sendmsg"),
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn repeated_peeks_close_all_duplicates_including_truncated_rights() {
+        for count in [1, 3, 253] {
+            let (sender, receiver) = sockets();
+            let (read_end, write_end) = pipe().expect("pipe");
+            send_rights(&sender, b"rights", &write_end, count);
+            drop(write_end);
+            let mut bytes = [0; 64];
+            for _ in 0..8 {
+                assert_eq!(
+                    peek_descriptor_free_bytes(&receiver, &mut bytes).expect("peek"),
+                    None
+                );
+            }
+            drop(receiver);
+            drop(sender);
+            fcntl_setfl(&read_end, OFlags::NONBLOCK).expect("nonblocking pipe");
+            assert_eq!(
+                rustix::io::read(&read_end, &mut bytes).expect("all peek duplicates must close"),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_appended_after_peek_remains_after_the_consumed_prefix() {
+        let (sender, receiver) = sockets();
+        rustix::io::write(&sender, b"prefix").expect("plain prefix");
+        let mut bytes = [0; 64];
+        let plain = peek_descriptor_free_bytes(&receiver, &mut bytes)
+            .expect("plain peek")
+            .expect("no rights yet");
+        assert_eq!(plain, 6);
+        let (read_end, write_end) = pipe().expect("pipe");
+        send_rights(&sender, b"suffix", &write_end, 1);
+        drop(write_end);
+        assert_eq!(
+            rustix::io::read(&receiver, &mut bytes[..plain]).expect("consume peeked prefix"),
+            plain
+        );
+        assert_eq!(&bytes[..plain], b"prefix");
+        assert_eq!(
+            peek_descriptor_free_bytes(&receiver, &mut bytes).expect("appended rights peek"),
+            None
+        );
+        // The peek must preserve the original queued descriptor, and close
+        // only the temporary duplicate returned by MSG_PEEK.
+        fcntl_setfl(&read_end, OFlags::NONBLOCK).expect("nonblocking pipe");
+        assert_eq!(rustix::io::read(&read_end, &mut bytes), Err(Errno::AGAIN));
+        drop(receiver);
+        assert_eq!(
+            rustix::io::read(&read_end, &mut bytes).expect("queued rights close"),
+            0
+        );
     }
 }

@@ -57,11 +57,31 @@ pub fn lookup_data(
     path: &str,
     obj_type: &ObjectType,
 ) -> Frame {
+    lookup_data_with_signature(
+        seq,
+        reply_peer,
+        obj_id,
+        path,
+        obj_type,
+        obj_type.signature(),
+    )
+}
+
+/// LOOKUP's object identity is stable, while each caller sees only the
+/// declared methods its ACL permits. Preserve their original wire bytes.
+pub fn lookup_data_with_signature(
+    seq: u16,
+    reply_peer: u32,
+    obj_id: ObjectId,
+    path: &str,
+    obj_type: &ObjectType,
+    signature: &[u8],
+) -> Frame {
     let mut env = EnvBuilder::new();
     env.push_str(UbusAttr::ObjPath, path);
     env.push_u32(UbusAttr::ObjId, obj_id.get());
     env.push_u32(UbusAttr::ObjType, obj_type.id().get());
-    env.push_signature(obj_type.signature());
+    env.push_signature(signature);
     Frame::to_peer(MsgType::Data, seq, reply_peer, env.finish())
 }
 

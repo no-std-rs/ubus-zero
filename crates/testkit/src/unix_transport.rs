@@ -1,14 +1,18 @@
 //! Host-side Unix socket transport used by the compatibility suites.
 
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::fd::BorrowedFd;
+
 use ubus::error::UbusError;
 use ubus::transport::Transport;
-use ubus::wire::{Codec, Frame, MAX_MSG_LEN};
+use ubus::wire::{Codec, Frame, HEADER_SIZE, MAX_MSG_LEN};
 
 /// A non-blocking Unix-stream transport for integration tests and examples.
 pub struct UnixUbusTransport {
@@ -77,6 +81,17 @@ impl Transport for UnixUbusTransport {
             }
         };
 
+        // The codec accepts standalone eight-byte headers for in-memory
+        // callers. Socket frames always include the four-byte outer blob
+        // header, so an eight-byte read must remain buffered until it arrives.
+        if self.rx_buf.len() < HEADER_SIZE + 4 {
+            return if closed {
+                Err(UbusError::Closed)
+            } else {
+                Ok(None)
+            };
+        }
+
         match Codec::read_frame(&self.rx_buf) {
             Ok((frame, consumed)) => {
                 self.rx_buf.drain(..consumed);
@@ -92,10 +107,81 @@ impl Transport for UnixUbusTransport {
     }
 
     fn wait_recv(&mut self) {
-        thread::sleep(Duration::from_millis(1));
+        // Match the public Unix transport's readiness wait. The client's
+        // fixed idle-iteration budget assumes up to 50 ms of waiting per
+        // iteration; 1 ms sleeps gave fragmented compatibility probes only
+        // about 200 ms to finish under contention.
+        let timeout = Timespec {
+            tv_sec: 0,
+            tv_nsec: 50_000_000,
+        };
+        // SAFETY: the stream owns this descriptor for the entire poll call.
+        let fd = unsafe { BorrowedFd::borrow_raw(self.stream.as_raw_fd()) };
+        let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+        let _ = poll(&mut fds, Some(&timeout));
     }
 }
 
 fn io_error(error: io::Error) -> UbusError {
     UbusError::Io(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ubus::envelope::{EnvBuilder, UbusAttr};
+    use ubus::wire::MsgType;
+
+    fn pair() -> (UnixStream, UnixUbusTransport) {
+        let (sender, stream) = UnixStream::pair().expect("socketpair");
+        stream.set_nonblocking(true).expect("nonblocking receiver");
+        (
+            sender,
+            UnixUbusTransport {
+                stream,
+                rx_buf: Vec::new(),
+            },
+        )
+    }
+
+    fn frame() -> Frame {
+        let mut envelope = EnvBuilder::new();
+        envelope.push_u32(UbusAttr::Status, 0);
+        Frame::to_broker(MsgType::Status, 17, envelope.finish())
+    }
+
+    #[test]
+    fn every_header_split_waits_for_the_complete_wire_frame() {
+        let expected = frame();
+        let bytes = Codec::write_frame(&expected);
+        for split in 1..=HEADER_SIZE + 4 {
+            let (mut sender, mut receiver) = pair();
+            sender.write_all(&bytes[..split]).expect("header prefix");
+            assert_eq!(
+                receiver.recv().expect("partial frame"),
+                None,
+                "split {split}"
+            );
+            sender.write_all(&bytes[split..]).expect("remaining frame");
+            assert_eq!(
+                receiver.recv().expect("complete frame"),
+                Some(expected.clone()),
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn eof_at_every_header_split_reports_closed() {
+        let bytes = Codec::write_frame(&frame());
+        for split in 1..=HEADER_SIZE + 4 {
+            let (mut sender, mut receiver) = pair();
+            sender.write_all(&bytes[..split]).expect("header prefix");
+            drop(sender);
+            assert!(
+                matches!(receiver.recv(), Err(UbusError::Closed)),
+                "split {split}"
+            );
+        }
+    }
 }

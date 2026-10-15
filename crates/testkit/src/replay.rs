@@ -15,7 +15,7 @@ use crate::canon::{self, CanonEvent, CanonEventKind, CanonTranscript};
 use crate::compat::{BrokerArm, BrokerOpts};
 use crate::golden::Golden;
 use crate::wire_tap::TapDirection;
-use crate::{skip, WireTap};
+use crate::{skip, TapPolicy, WireTap};
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -28,7 +28,10 @@ pub fn replay_golden(test: &str, golden: &Golden, opts: &BrokerOpts) -> Option<C
         }
         Err(e) => panic!("broker start for {test}(golden): {e:?}"),
     };
-    let tap = WireTap::spawn(harness.socket_path())
+    let policy = TapPolicy {
+        fragment_c2b: crate::ubusd::fault_profile_from_env().and_then(|profile| profile.fragment),
+    };
+    let tap = WireTap::spawn_with_policy(harness.socket_path(), policy)
         .unwrap_or_else(|e| panic!("spawn tap for {test}(golden): {e:?}"));
     let tap_path = tap.socket_path().to_owned();
 
@@ -433,6 +436,12 @@ impl FrameReader {
     fn read_to_eof(&mut self, stream: &mut UnixStream, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         loop {
+            if !self.buf.is_empty() {
+                return Err(format!(
+                    "unexpected bytes before EOF; hex: {}",
+                    hex(&self.buf)
+                ));
+            }
             if Instant::now() >= deadline {
                 return Err(format!("timeout after {timeout:?}"));
             }
@@ -479,6 +488,78 @@ mod tests {
     use ubus::wire::{Frame, Header, MsgType, PROTO_VERSION};
 
     use super::*;
+
+    fn status_frame() -> Frame {
+        let mut env = EnvBuilder::new();
+        env.push_u32(UbusAttr::Status, 0);
+        Frame {
+            hdr: Header {
+                version: PROTO_VERSION,
+                ty: MsgType::Status,
+                seq: 7,
+                peer: 1,
+            },
+            payload: env.finish(),
+        }
+    }
+
+    #[test]
+    fn eof_rejects_extra_frame_after_expected_reply() {
+        let (mut reader_stream, mut writer) = UnixStream::pair().unwrap();
+        let expected = status_frame();
+        let bytes = Codec::write_frame(&expected);
+        writer
+            .write_all(&[bytes.as_slice(), bytes.as_slice()].concat())
+            .unwrap();
+        writer.shutdown(Shutdown::Write).unwrap();
+
+        let mut reader = FrameReader::default();
+        assert_eq!(
+            reader.read_next(&mut reader_stream, STEP_TIMEOUT).unwrap(),
+            expected
+        );
+        let error = reader
+            .read_to_eof(&mut reader_stream, STEP_TIMEOUT)
+            .unwrap_err();
+        assert!(error.contains("unexpected bytes before EOF"), "{error}");
+    }
+
+    #[test]
+    fn eof_rejects_new_trailing_junk_after_expected_reply() {
+        let (mut reader_stream, mut writer) = UnixStream::pair().unwrap();
+        let expected = status_frame();
+        writer.write_all(&Codec::write_frame(&expected)).unwrap();
+        let mut reader = FrameReader::default();
+        assert_eq!(
+            reader.read_next(&mut reader_stream, STEP_TIMEOUT).unwrap(),
+            expected
+        );
+
+        // These bytes arrive only after the expected frame was consumed, so
+        // checking the existing buffer alone cannot detect this divergence.
+        writer.write_all(&[0xde, 0xad]).unwrap();
+        writer.shutdown(Shutdown::Write).unwrap();
+        let error = reader
+            .read_to_eof(&mut reader_stream, STEP_TIMEOUT)
+            .unwrap_err();
+        assert!(error.contains("dead"), "{error}");
+    }
+
+    #[test]
+    fn eof_accepts_clean_close_after_expected_reply() {
+        let (mut reader_stream, mut writer) = UnixStream::pair().unwrap();
+        let expected = status_frame();
+        writer.write_all(&Codec::write_frame(&expected)).unwrap();
+        writer.shutdown(Shutdown::Write).unwrap();
+        let mut reader = FrameReader::default();
+        assert_eq!(
+            reader.read_next(&mut reader_stream, STEP_TIMEOUT).unwrap(),
+            expected
+        );
+        reader
+            .read_to_eof(&mut reader_stream, STEP_TIMEOUT)
+            .unwrap();
+    }
 
     #[test]
     fn c2b_substitution_mints_unbound_client_invented_ids() {

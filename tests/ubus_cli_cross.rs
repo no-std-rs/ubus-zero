@@ -1156,3 +1156,55 @@ fn cli_subscribe_receives_notification(#[case] arm: MatrixArm) {
         &|path| cli_subscribe_receives_notification_body(path, &cli),
     );
 }
+
+/// Use independent real CLI processes, not synthetic transports, to put
+/// overlapping large messages through the libubus encoder/decoder and each
+/// broker's partial-read/write queues. Their connection order is intentionally
+/// unconstrained; check each reply against its own request instead of freezing
+/// an arbitrary concurrent transcript as a golden.
+#[rstest]
+#[case::upstream(false)]
+#[case::rs(true)]
+fn cli_concurrent_large_calls_remain_correlated(#[case] rust: bool) {
+    let Some(cli) = locate_cli_or_skip("cli concurrent large calls") else {
+        return;
+    };
+    let broker = if rust {
+        ubus_testkit::UbusdHarness::start_rust()
+    } else {
+        ubus_testkit::UbusdHarness::start_upstream()
+    }
+    .unwrap();
+    let Some(broker) = broker else {
+        skip::or_skip("cli concurrent large calls", "broker unavailable");
+        return;
+    };
+    let socket = broker.socket_path();
+    let owner = OwnerThread::spawn_with_deadline(
+        socket.to_str().unwrap().to_owned(),
+        Duration::from_secs(15),
+        || {
+            UbusObject::new("example.concurrent").method("echo", |args| {
+                Ok(BlobMsgTable::build(|builder| {
+                    reencode_blobmsg(builder, args)
+                }))
+            })
+        },
+    );
+    owner.wait_ready();
+    std::thread::scope(|scope| {
+        for worker in 0..8 {
+            let cli = &cli;
+            scope.spawn(move || {
+                let text = "üx".repeat(16_384);
+                for request in 0..3 {
+                    let args = serde_json::json!({"worker":worker, "request":request, "text":text, "nested":{"values":[true,-42,2147483648i64,1.25]}});
+                    let output = cli.run(socket, &["-t", "5", "call", "example.concurrent", "echo", &args.to_string()]).unwrap();
+                    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(), args);
+                }
+            });
+        }
+    });
+    owner.shutdown();
+}

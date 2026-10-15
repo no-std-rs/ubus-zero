@@ -39,6 +39,8 @@ pub struct Peer {
 
     /// SO_PEERCRED uid of the accepted socket.
     pub(crate) uid: Option<u32>,
+    pub(crate) gid: Option<u32>,
+    pub(crate) extra_gids: Vec<u32>,
 
     pub(crate) rx_buf: Vec<u8>,
     pub(crate) tx_buf: VecDeque<u8>,
@@ -88,6 +90,8 @@ impl Peer {
         Self {
             fd: Some(fd),
             uid,
+            gid: None,
+            extra_gids: Vec::new(),
             rx_buf: Vec::with_capacity(2048),
             tx_buf: VecDeque::with_capacity(2048),
             rx_fds: VecDeque::new(),
@@ -111,6 +115,8 @@ impl Peer {
         Self {
             fd: None,
             uid: None,
+            gid: None,
+            extra_gids: Vec::new(),
             rx_buf: Vec::new(),
             tx_buf: VecDeque::new(),
             rx_fds: VecDeque::new(),
@@ -138,6 +144,8 @@ impl Peer {
     pub(crate) fn cred(&self) -> Cred {
         Cred {
             uid: self.uid,
+            gid: self.gid,
+            extra_gids: self.extra_gids.clone(),
             user: self.user.clone(),
             group: self.group.clone(),
         }

@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ubus   = { package = "ubus-zero", path = "../.." }
-rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "fs", "pipe", "process", "time"] }
+rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "fs", "pipe", "process", "time", "event"] }
 paste = "1"
 
 # `libubox-sys` is Linux-only (libubox/libubus only build on Linux)

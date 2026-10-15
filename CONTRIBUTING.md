@@ -31,7 +31,7 @@ every reference-backed case to run:
 
 ```sh
 tools/ubusd-builder/build.sh
-UBUS_ZERO_COMPAT=require cargo test --workspace --all-features
+python3 tools/ubus-compat-check.py
 ```
 
 The compatibility builder needs Docker Buildx. It writes only ignored artifacts

@@ -7,6 +7,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Parallel compatibility coverage for ACL identities and reloads, descriptor
+  passing, daemon lifecycle, upstream and Rust CLIs, and real rpcd/UCI/file
+  consumers, with isolated per-process fixtures.
+- Full-workspace upstream drift checks and concurrent fault-profile runs.
+
+### Fixed
+
+- Preserve ubus frame and descriptor boundaries across fragmented and pipelined
+  socket reads, including disposal of descriptors outside the header window.
+- Keep fragmented Unix client replies buffered until the outer blob header
+  arrives instead of prematurely accepting eight-byte header fragments.
+- Match pinned OpenWrt ACL file safety, identity resolution, supplementary
+  groups, mixed-type entries, and method visibility during lookup, while
+  unresolved identity names remain denied.
+- Replace duplicate ACL JSON keys using the final value in the original key
+  position, including permission revocation and privilege tables.
+- Read complete supplementary-group records so long lines cannot truncate GIDs
+  into incorrect ACL grants or drop valid groups below the 64-group limit.
+- Match ACL grants once per object when filtering non-root lookup replies,
+  avoiding repeated registry scans for every declared method.
+- Register malformed object signatures as untyped objects like upstream.
+- Reject unexpected replies or trailing bytes during golden transcript replay.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added

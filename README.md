@@ -235,7 +235,7 @@ require them:
 
 ```sh
 tools/ubusd-builder/build.sh
-UBUS_ZERO_COMPAT=require cargo test --workspace --all-features
+python3 tools/ubus-compat-check.py
 ```
 
 See the [contributing guide](https://github.com/no-std-rs/ubus-zero/blob/main/CONTRIBUTING.md)
