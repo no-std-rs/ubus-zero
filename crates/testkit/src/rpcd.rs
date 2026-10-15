@@ -64,7 +64,20 @@ impl RpcdHarness {
         let plugins = dir.join("plugins");
         let config = dir.join("config");
         let run = dir.join("run");
-        for path in [&acld, &plugins, &config, &run] {
+        let files = dir.join("files");
+        let delta = dir.join("delta");
+        let state = dir.join("state");
+        let override_dir = dir.join("override");
+        for path in [
+            &acld,
+            &plugins,
+            &config,
+            &run,
+            &files,
+            &delta,
+            &state,
+            &override_dir,
+        ] {
             fs::create_dir(path)?;
         }
         for (name, contents) in acl_files {
@@ -72,16 +85,28 @@ impl RpcdHarness {
         }
         fs::write(config.join("rpcd"), login_config())?;
 
+        // Keep executable script plugins separate from dlopen libraries: the
+        // file.so fixture is a shared object, not an executable rpcd plugin.
+        let exec_plugins = dir.join("exec-plugins");
+        fs::create_dir(&exec_plugins)?;
+        if let Some(plugin) = locate_file_plugin(binary) {
+            fs::copy(plugin, plugins.join("file.so"))?;
+        }
+
         let path_map = format!(
-            "/usr/local/share/rpcd/acl.d={},/usr/local/lib/rpcd={},/usr/local/libexec/rpcd={},/etc/config={},/var/run/rpcd={}",
+            "/usr/local/share/rpcd/acl.d={},/usr/local/lib/rpcd={},/usr/local/libexec/rpcd={},/etc/config={},/var/run/rpcd={},/tmp/.uci={},/var/state={},/var/run/uci={}",
             acld.display(),
             plugins.display(),
-            plugins.display(),
+            exec_plugins.display(),
             config.display(),
             run.display(),
+            delta.display(),
+            state.display(),
+            override_dir.display(),
         );
         let mut preload = std::env::var_os("LD_PRELOAD").unwrap_or_default();
         append_preload(&mut preload, env!("UBUS_TESTKIT_PATH_REDIRECT"));
+        append_preload(&mut preload, env!("UBUS_TESTKIT_RPCD_EXEC_ORDER"));
 
         let mut child = Command::new(binary)
             .arg("-s")
@@ -89,6 +114,7 @@ impl RpcdHarness {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .env("UBUS_TESTKIT_PATH_MAP", path_map)
+            .env("UBUS_TESTKIT_RPCD_EXEC_WAIT_EOF", "1")
             .env("LD_PRELOAD", preload)
             .spawn()?;
         let mut stderr = child.stderr.take();
@@ -99,8 +125,13 @@ impl RpcdHarness {
                 if let Some(status) = child.try_wait()? {
                     return early_exit(status, &mut stderr);
                 }
-                if let Ok(output) = cli.run(broker_socket, &["list", "session"]) {
-                    if output.status.success() && !output.stdout.is_empty() {
+                if let Ok(output) = cli.run(broker_socket, &["list"]) {
+                    let objects = String::from_utf8_lossy(&output.stdout);
+                    let ready = ["session", "uci"]
+                        .into_iter()
+                        .chain(plugins.join("file.so").is_file().then_some("file"))
+                        .all(|object| objects.lines().any(|line| line == object));
+                    if output.status.success() && ready {
                         return Ok(Some(Self {
                             child,
                             stderr,
@@ -122,7 +153,7 @@ impl RpcdHarness {
             let stderr = drain_stderr(&mut stderr);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                format!("rpcd did not register session within 5 s; stderr: {stderr}"),
+                format!("rpcd did not register its fixture objects within 5 s; stderr: {stderr}"),
             ));
         }
 
@@ -145,6 +176,31 @@ impl RpcdHarness {
     /// Socket of the broker this daemon is attached to.
     pub fn socket(&self) -> &Path {
         &self.socket
+    }
+
+    /// Private configuration directory replacing `/etc/config` in this child.
+    /// Seed packages here before invoking the rpcd `uci` object. No host UCI
+    /// configuration is consulted or modified.
+    pub fn config_dir(&self) -> PathBuf {
+        self.dir.join("config")
+    }
+
+    /// Private scratch directory for file-plugin operations and ACL fixtures.
+    pub fn files_dir(&self) -> PathBuf {
+        self.dir.join("files")
+    }
+
+    /// Private ACL directory. Login loads these files when it creates a
+    /// session, allowing a test to grant access to its freshly allocated paths.
+    pub fn acl_dir(&self) -> PathBuf {
+        self.dir.join("acl.d")
+    }
+
+    /// Whether the exported upstream `file.so` plugin was installed for this
+    /// child. Callers must report an unavailable fixture through `skip::or_skip`
+    /// so strict compatibility runs cannot silently omit the file scenarios.
+    pub fn has_file_plugin(&self) -> bool {
+        self.dir.join("plugins/file.so").is_file()
     }
 
     /// Stop and reap the rpcd child. Dropping the consumed harness then removes
@@ -242,4 +298,23 @@ fn locate_rpcd() -> Option<OsString> {
         .map(|dir| dir.join("rpcd"))
         .find(|candidate| candidate.is_file())
         .map(PathBuf::into_os_string)
+}
+
+fn locate_file_plugin(binary: &OsString) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("UBUS_ZERO_RPCD_PLUGINS") {
+        let candidate = PathBuf::from(dir).join("file.so");
+        return candidate.is_file().then_some(candidate);
+    }
+    let adjacent = Path::new(binary).parent()?.join("rpcd-plugins/file.so");
+    if adjacent.is_file() {
+        return Some(adjacent);
+    }
+    [
+        ".dep/bin/rpcd-plugins/file.so",
+        "../.dep/bin/rpcd-plugins/file.so",
+        "../../.dep/bin/rpcd-plugins/file.so",
+    ]
+    .into_iter()
+    .map(|relative| Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
+    .find(|candidate| candidate.is_file())
 }

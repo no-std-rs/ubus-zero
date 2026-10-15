@@ -3,8 +3,9 @@
 //! These cases run upstream, rs, a fresh-broker parity arm, and a golden replay
 //! arm under a fixed synthetic identity (`testuser`/`testgroup`) supplied by
 //! the nss_spoof shim. That makes canonical transcripts machine-independent.
-//! Upstream matches ACL entries numerically (resolving names at load time),
-//! while rs matches name strings; the shim keeps both views consistent.
+//! Both brokers resolve ACL names at load time and check numeric identities,
+//! including supplementary groups. Each broker child has its own NSS/proc
+//! fixtures, so unrelated cases can run concurrently without host accounts.
 
 #![cfg(feature = "testing")]
 
@@ -40,6 +41,7 @@ fn opts(acl: Option<&AclDir>, peercred: String) -> BrokerOpts {
                 "UBUS_TESTKIT_NSS_GROUPS".to_owned(),
                 format!("{TEST_UID}:{TEST_GROUP},0:root"),
             ),
+            ("UBUS_TESTKIT_NSS_EXTRA_GIDS".to_owned(), String::new()),
         ],
     }
 }
@@ -659,6 +661,729 @@ acl_case!(peercred_read_failure_client_refused, arm, {
         .push(("UBUS_TESTKIT_PEERCRED_FAIL".to_owned(), "1".to_owned()));
     run_matrix_case_with(test, arm, &options, &refused_before_hello_body);
 });
+
+// Exercise the loader through a real process as well as the pure ACL unit
+// tests: ownership, NSS resolution and typed JSON policy all affect whether
+// these grants ever reach the authorization checks.
+macro_rules! publish_rule_case {
+    ($name:ident, $grant:expr, $object:expr, $expected:expr) => {
+        acl_case!($name, arm, {
+            let acl = AclDir::with_grant($grant);
+            run_nonroot(
+                concat!("ubusd_acl ", stringify!($name)),
+                arm,
+                Some(&acl),
+                &|path| named_add_body(path, $object, $expected),
+            );
+        });
+    };
+}
+
+publish_rule_case!(
+    publish_star_matches_any_path,
+    r#"{"user":"testuser","publish":["*"]}"#,
+    "any.object",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    publish_prefix_matches_empty_suffix,
+    r#"{"user":"testuser","publish":["prefix.*"]}"#,
+    "prefix.",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    publish_interior_star_is_literal,
+    r#"{"user":"testuser","publish":["prefix.*.tail"]}"#,
+    "prefix.any.tail",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+publish_rule_case!(
+    publish_question_mark_is_literal,
+    r#"{"user":"testuser","publish":["prefix.?ne"]}"#,
+    "prefix.one",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+publish_rule_case!(
+    publish_without_identity_is_denied,
+    r#"{"publish":["*"]}"#,
+    "identity.required",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+publish_rule_case!(
+    publish_user_takes_precedence_over_group,
+    r#"{"user":"no-such-ubus-test-user","group":"testgroup","publish":["*"]}"#,
+    "identity.precedence",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+publish_rule_case!(
+    publish_user_with_unmatched_group_is_allowed,
+    r#"{"user":"testuser","group":"no-such-ubus-test-group","publish":["*"]}"#,
+    "identity.user",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    publish_mixed_type_array_ignores_non_strings,
+    r#"{"user":"testuser","publish":[7,null,true,{},[],"mixed.allowed"]}"#,
+    "mixed.allowed",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    wrong_type_access_does_not_discard_publish_grant,
+    r#"{"user":"testuser","publish":["typed.allowed"],"access":[]}"#,
+    "typed.allowed",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    wrong_type_subscribe_does_not_discard_publish_grant,
+    r#"{"user":"testuser","publish":["typed.allowed"],"subscribe":"*"}"#,
+    "typed.allowed",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    wrong_type_publish_is_not_a_grant,
+    r#"{"user":"testuser","publish":"*"}"#,
+    "typed.denied",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+publish_rule_case!(
+    send_grant_does_not_allow_publish,
+    r#"{"user":"testuser","send":["*"]}"#,
+    "operation.independent",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+publish_rule_case!(
+    empty_pattern_does_not_allow_nonempty_path,
+    r#"{"user":"testuser","publish":[""]}"#,
+    "pattern.nonempty",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+
+publish_rule_case!(
+    wrong_type_user_allows_valid_group_identity,
+    r#"{"user":42,"group":"testgroup","publish":["*"]}"#,
+    "identity.group",
+    UBUS_STATUS_OK
+);
+
+macro_rules! access_rule_case {
+    ($name:ident, $access:expr, $expected:expr) => {
+        acl_case!($name, arm, {
+            let grant = format!(
+                r#"{{"user":"testuser","publish":["svc.*"],"access":{}}}"#,
+                $access
+            );
+            let acl = AclDir::with_grant(&grant);
+            run_nonroot(
+                concat!("ubusd_acl ", stringify!($name)),
+                arm,
+                Some(&acl),
+                &|path| {
+                    if $expected == UBUS_STATUS_OK {
+                        access_body(path, "svc.rules", "ping", $expected)
+                    } else {
+                        // An unauthorized object is hidden from LOOKUP, so take
+                        // its id from the owner's ADD_OBJECT reply instead.
+                        let mut owner = connect_and_wait_hello(path);
+                        let obj = add_named(&mut owner, 1, "svc.rules");
+                        let mut caller = connect_and_wait_hello(path);
+                        invoke(&mut caller, 2, obj, "ping", None, $expected);
+                    }
+                },
+            );
+        });
+    };
+}
+
+access_rule_case!(
+    access_object_prefix_allows_method,
+    r#"{"svc.*":{"methods":["ping"]}}"#,
+    UBUS_STATUS_OK
+);
+access_rule_case!(
+    access_empty_methods_denies,
+    r#"{"svc.rules":{"methods":[]}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_wrong_type_methods_denies,
+    r#"{"svc.rules":{"methods":"*"}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_method_prefix_is_not_a_wildcard,
+    r#"{"svc.rules":{"methods":["pi*"]}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_mixed_methods_ignores_non_strings,
+    r#"{"svc.rules":{"methods":[4,true,null,"ping"]}}"#,
+    UBUS_STATUS_OK
+);
+access_rule_case!(
+    access_tags_do_not_allow_invocation,
+    r#"{"svc.rules":{"tags":["ping"]}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_privileges_do_not_allow_invocation,
+    r#"{"svc.rules":{"acl":{"ping":true}}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_exact_object_does_not_match_child,
+    r#"{"svc":{"methods":["*"]}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+
+acl_case!(separate_acl_files_combine_publish_and_access, arm, {
+    let acl = AclDir::with_files(&[
+        (
+            "10-publish.json",
+            r#"{"user":"testuser","publish":["svc.*"]}"#,
+        ),
+        (
+            "20-access.json",
+            r#"{"group":"testgroup","access":{"svc.*":{"methods":["ping"]}}}"#,
+        ),
+    ]);
+    run_nonroot(
+        "ubusd_acl separate_acl_files_combine_publish_and_access",
+        arm,
+        Some(&acl),
+        &|path| access_body(path, "svc.combined", "ping", UBUS_STATUS_OK),
+    );
+});
+
+acl_case!(non_json_filename_does_not_load_grant, arm, {
+    let acl = AclDir::with_files(&[("grant.txt", r#"{"user":"testuser","publish":["*"]}"#)]);
+    run_nonroot(
+        "ubusd_acl non_json_filename_does_not_load_grant",
+        arm,
+        Some(&acl),
+        &|path| named_add_body(path, "filename.denied", UBUS_STATUS_INVALID_ARGUMENT),
+    );
+});
+
+macro_rules! ownership_case {
+    ($name:ident, $key:literal, $value:literal, $expected:expr) => {
+        acl_case!($name, arm, {
+            let acl = AclDir::with_grant(r#"{"user":"testuser","publish":["safe.*"]}"#);
+            let mut options = nonroot_opts(Some(&acl));
+            options.env.push(($key.to_owned(), $value.to_owned()));
+            run_matrix_case_with(
+                concat!("ubusd_acl ", stringify!($name)),
+                arm,
+                &options,
+                &|path| named_add_body(path, "safe.object", $expected),
+            );
+        });
+    };
+}
+
+ownership_case!(
+    nonroot_acl_owner_is_rejected,
+    "UBUS_TESTKIT_STAT_UID",
+    "1000",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+ownership_case!(
+    nonroot_acl_group_is_rejected,
+    "UBUS_TESTKIT_STAT_GID",
+    "1000",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+ownership_case!(
+    group_writable_acl_is_rejected,
+    "UBUS_TESTKIT_STAT_MODE",
+    "0664",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+ownership_case!(
+    other_writable_acl_is_rejected,
+    "UBUS_TESTKIT_STAT_MODE",
+    "0646",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+ownership_case!(
+    other_executable_acl_is_rejected,
+    "UBUS_TESTKIT_STAT_MODE",
+    "0645",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+ownership_case!(
+    owner_executable_acl_is_allowed,
+    "UBUS_TESTKIT_STAT_MODE",
+    "0744",
+    UBUS_STATUS_OK
+);
+ownership_case!(
+    group_executable_acl_is_allowed,
+    "UBUS_TESTKIT_STAT_MODE",
+    "0654",
+    UBUS_STATUS_OK
+);
+
+macro_rules! supplementary_group_case {
+    ($name:ident, $extra:expr, $expected:expr) => {
+        acl_case!($name, arm, {
+            let acl = AclDir::with_grant(r#"{"group":"secondary","publish":["groups.*"]}"#);
+            let mut options = nonroot_opts(Some(&acl));
+            options.env.push((
+                "UBUS_TESTKIT_NSS_GROUPS".to_owned(),
+                "1000:testgroup,2000:secondary,0:root".to_owned(),
+            ));
+            options
+                .env
+                .push(("UBUS_TESTKIT_NSS_EXTRA_GIDS".to_owned(), $extra.to_owned()));
+            run_matrix_case_with(
+                concat!("ubusd_acl ", stringify!($name)),
+                arm,
+                &options,
+                &|path| named_add_body(path, "groups.object", $expected),
+            );
+        });
+    };
+}
+
+supplementary_group_case!(supplementary_group_grant_allows, "2000", UBUS_STATUS_OK);
+supplementary_group_case!(
+    supplementary_duplicate_group_grant_allows,
+    "1000 2000 2000",
+    UBUS_STATUS_OK
+);
+supplementary_group_case!(
+    empty_supplementary_groups_do_not_grant,
+    "",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+supplementary_group_case!(
+    unmatched_supplementary_groups_do_not_grant,
+    "3000 4000",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+
+supplementary_group_case!(
+    supplementary_groups_stop_at_invalid_token,
+    "3000 invalid 2000",
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+supplementary_group_case!(
+    valid_supplementary_group_before_invalid_token_allows,
+    "2000 invalid",
+    UBUS_STATUS_OK
+);
+supplementary_group_case!(
+    supplementary_group_at_limit_allows,
+    format!("{}2000", "3000 ".repeat(63)),
+    UBUS_STATUS_OK
+);
+supplementary_group_case!(
+    supplementary_group_beyond_limit_denies,
+    format!("{}2000", "3000 ".repeat(64)),
+    UBUS_STATUS_INVALID_ARGUMENT
+);
+
+macro_rules! identity_alias_case {
+    ($name:ident, $grant:literal, $key:literal, $mapping:literal) => {
+        acl_case!($name, arm, {
+            let acl = AclDir::with_grant($grant);
+            let mut options = nonroot_opts(Some(&acl));
+            options.env.push(($key.to_owned(), $mapping.to_owned()));
+            run_matrix_case_with(
+                concat!("ubusd_acl ", stringify!($name)),
+                arm,
+                &options,
+                &|path| named_add_body(path, "aliases.object", UBUS_STATUS_OK),
+            );
+        });
+    };
+}
+
+identity_alias_case!(
+    user_alias_matches_numeric_uid,
+    r#"{"user":"alias","publish":["aliases.*"]}"#,
+    "UBUS_TESTKIT_NSS_USERS",
+    "1000:testuser,1000:alias,0:root"
+);
+identity_alias_case!(
+    group_alias_matches_numeric_gid,
+    r#"{"group":"alias","publish":["aliases.*"]}"#,
+    "UBUS_TESTKIT_NSS_GROUPS",
+    "1000:testgroup,1000:alias,0:root"
+);
+
+acl_case!(unreadable_proc_status_keeps_primary_group_grants, arm, {
+    let acl = AclDir::with_grant(r#"{"group":"testgroup","publish":["groups.*"]}"#);
+    let mut options = nonroot_opts(Some(&acl));
+    options
+        .env
+        .push(("UBUS_TESTKIT_NSS_PROC_FAIL".to_owned(), "1".to_owned()));
+    run_matrix_case_with(
+        "ubusd_acl unreadable_proc_status_keeps_primary_group_grants",
+        arm,
+        &options,
+        &|path| named_add_body(path, "groups.primary", UBUS_STATUS_OK),
+    );
+});
+
+acl_case!(primary_gid_can_differ_from_uid, arm, {
+    let acl = AclDir::with_grant(r#"{"group":"secondary","publish":["groups.*"]}"#);
+    let mut options = opts(Some(&acl), "1000:2000:1".to_owned());
+    options.env.push((
+        "UBUS_TESTKIT_NSS_GROUPS".to_owned(),
+        "2000:secondary,0:root".to_owned(),
+    ));
+    run_matrix_case_with(
+        "ubusd_acl primary_gid_can_differ_from_uid",
+        arm,
+        &options,
+        &|path| named_add_body(path, "groups.primary", UBUS_STATUS_OK),
+    );
+});
+
+fn visibility_body(path: &str, query: Option<&str>, methods: &[&str], empty_signature: bool) {
+    let mut owner = connect_and_wait_hello(path);
+    let mut signature = BlobBuilder::new();
+    if !empty_signature {
+        for method in ["ping", "secret"] {
+            signature.open_table(Some(method));
+            signature.put_i32(Some("argument"), 3);
+            signature.close_table();
+        }
+    }
+    let signature = signature.finish();
+    let (object, object_type) =
+        common::raw_add_object_with_signature(&mut owner, 1, "visible.object", &signature);
+    let mut caller = connect_and_wait_hello(path);
+    let mut env = EnvBuilder::new();
+    if let Some(query) = query {
+        env.push_str(UbusAttr::ObjPath, query);
+    }
+    caller
+        .send(&Frame {
+            hdr: Header {
+                version: PROTO_VERSION,
+                ty: MsgType::Lookup,
+                seq: 2,
+                peer: 0,
+            },
+            payload: env.finish(),
+        })
+        .expect("LOOKUP visibility");
+    if !methods.is_empty() || empty_signature {
+        let data = recv_until(&mut caller, Duration::from_secs(5), |frame| {
+            frame.hdr.seq == 2 && frame.hdr.ty == MsgType::Data
+        })
+        .expect("visible object DATA");
+        assert_eq!(
+            find(&data.payload, UbusAttr::ObjId).and_then(|a| a.as_u32()),
+            Some(object)
+        );
+        assert_eq!(
+            find(&data.payload, UbusAttr::ObjType).and_then(|a| a.as_u32()),
+            Some(object_type)
+        );
+        let visible = find(&data.payload, UbusAttr::Signature)
+            .expect("visible signature")
+            .payload;
+        assert_eq!(
+            BlobIter::new(visible)
+                .map(|a| a.name.expect("method name"))
+                .collect::<Vec<_>>(),
+            methods
+        );
+        // Verify method policies survive filtering without re-encoding.
+        for method in BlobIter::new(visible) {
+            assert_eq!(
+                blob_lookup(method.payload, "argument").and_then(|a| a.value().ok()),
+                Some(BlobValue::Int32(3))
+            );
+        }
+    }
+    // A matching path still terminates with OK when ACL hides every method.
+    expect_status_only(&mut caller, 2, UBUS_STATUS_OK, "filtered LOOKUP");
+}
+
+macro_rules! visibility_case {
+    ($name:ident, $access:literal, $query:expr, $methods:expr, $empty:expr) => {
+        acl_case!($name, arm, {
+            let grant = format!(
+                r#"{{"user":"testuser","publish":["visible.*"],"access":{}}}"#,
+                $access
+            );
+            let acl = AclDir::with_grant(&grant);
+            run_nonroot(
+                concat!("ubusd_acl ", stringify!($name)),
+                arm,
+                Some(&acl),
+                &|path| visibility_body(path, $query, $methods, $empty),
+            );
+        });
+    };
+}
+
+visibility_case!(
+    lookup_exact_hides_denied_methods,
+    "{}",
+    Some("visible.object"),
+    &[],
+    false
+);
+visibility_case!(
+    lookup_prefix_hides_denied_methods,
+    "{}",
+    Some("visible.*"),
+    &[],
+    false
+);
+visibility_case!(lookup_all_hides_denied_methods, "{}", None, &[], false);
+visibility_case!(
+    lookup_exact_filters_method_signature,
+    r#"{"visible.*":{"methods":["ping"]}}"#,
+    Some("visible.object"),
+    &["ping"],
+    false
+);
+visibility_case!(
+    lookup_prefix_filters_method_signature,
+    r#"{"visible.*":{"methods":["ping"]}}"#,
+    Some("visible.*"),
+    &["ping"],
+    false
+);
+visibility_case!(
+    lookup_all_filters_method_signature,
+    r#"{"visible.*":{"methods":["ping"]}}"#,
+    None,
+    &["ping"],
+    false
+);
+visibility_case!(
+    lookup_star_access_retains_method_order,
+    r#"{"visible.*":{"methods":["*"]}}"#,
+    Some("visible.object"),
+    &["ping", "secret"],
+    false
+);
+visibility_case!(
+    lookup_empty_signature_remains_visible_without_access,
+    "{}",
+    Some("visible.object"),
+    &[],
+    true
+);
+
+// The pinned reference maps failed ACL name resolution to numeric zero.
+// Upstream fixed that unsafe invalid-configuration fallback in 008655958eb4.
+// Keep this Rust-only regression separate from valid-policy parity: a typo
+// must never grant permission to non-root clients carrying group zero.
+#[rstest]
+#[case::unknown_group_primary_zero(
+    "group",
+    "missinggroup",
+    "1000:0:1",
+    "",
+    UBUS_STATUS_INVALID_ARGUMENT
+)]
+#[case::unknown_group_supplementary_zero(
+    "group",
+    "missinggroup",
+    "1000:1000:1",
+    "0",
+    UBUS_STATUS_INVALID_ARGUMENT
+)]
+#[case::unknown_user("user", "missinguser", "1000:0:1", "0", UBUS_STATUS_INVALID_ARGUMENT)]
+#[case::resolved_primary_zero("group", "root", "1000:0:1", "", UBUS_STATUS_OK)]
+#[case::resolved_supplementary_zero("group", "root", "1000:1000:1", "0", UBUS_STATUS_OK)]
+#[case::resolved_zero_alias("group", "root-alias", "1000:0:1", "", UBUS_STATUS_OK)]
+#[case::root_bypasses_unknown_group("group", "missinggroup", "0:0:1", "", UBUS_STATUS_OK)]
+fn acl_identity_resolution_preserves_root_group_boundary(
+    #[case] principal: &str,
+    #[case] name: &str,
+    #[case] credentials: &str,
+    #[case] extra_gids: &str,
+    #[case] expected: i32,
+) {
+    let acl = AclDir::with_grant(&format!(
+        r#"{{"{principal}":"{name}","publish":["security.*"]}}"#
+    ));
+    let mut options = opts(Some(&acl), credentials.to_owned());
+    options.env.extend([
+        (
+            "UBUS_TESTKIT_NSS_USERS".to_owned(),
+            "1000:testuser,0:root,4242:missinguser".to_owned(),
+        ),
+        (
+            "UBUS_TESTKIT_NSS_GROUPS".to_owned(),
+            "1000:testgroup,0:root,0:root-alias,4242:missinggroup".to_owned(),
+        ),
+        ("UBUS_TESTKIT_NSS_FAIL_UIDS".to_owned(), "4242".to_owned()),
+        ("UBUS_TESTKIT_NSS_FAIL_GIDS".to_owned(), "4242".to_owned()),
+        (
+            "UBUS_TESTKIT_NSS_EXTRA_GIDS".to_owned(),
+            extra_gids.to_owned(),
+        ),
+    ]);
+    run_matrix_case_with(
+        "ubusd_acl acl_identity_resolution_preserves_root_group_boundary",
+        MatrixArm::Rs,
+        &options,
+        &|path| named_add_body(path, "security.object", expected),
+    );
+}
+
+fn signature_shape(shape: &str) -> (Vec<u8>, Vec<u8>) {
+    let valid = signature_with_ping_method();
+    let mut malformed = valid.clone();
+    match shape {
+        "valid" => return (valid.clone(), valid),
+        "empty" => return (Vec::new(), Vec::new()),
+        "empty-name" => {
+            let mut b = BlobBuilder::new();
+            b.open_table(None);
+            b.close_table();
+            malformed = b.finish();
+        }
+        "missing-terminator" => malformed[10] = 1,
+        "nonextended" => malformed[0] &= 0x7f,
+        "invalid-type" => malformed[0] = 0x89,
+        "short-int32" => malformed[0] = 0x85,
+        "unterminated-string" => malformed[0] = 0x83,
+        "mixed-valid-invalid" => {
+            malformed[10] = 1;
+            malformed.splice(..0, valid.iter().copied());
+        }
+        "truncated-tail" => {
+            malformed.extend_from_slice(&0x8200_0100_u32.to_be_bytes());
+            return (malformed, valid);
+        }
+        _ => unreachable!(),
+    }
+    (malformed, Vec::new())
+}
+
+fn signature_registration_body(path: &str, shape: &str, typed: bool) {
+    let (signature, expected_signature) = signature_shape(shape);
+    let mut owner = connect_and_wait_hello(path);
+    let mut env = EnvBuilder::new();
+    env.push_str(UbusAttr::ObjPath, "signature.object");
+    env.push_signature(&signature);
+    owner
+        .send(&Frame {
+            hdr: Header {
+                version: PROTO_VERSION,
+                ty: MsgType::AddObject,
+                seq: 1,
+                peer: 0,
+            },
+            payload: env.finish(),
+        })
+        .expect("ADD_OBJECT signature shape");
+    let added = recv_until(&mut owner, Duration::from_secs(5), |f| {
+        f.hdr.ty == MsgType::Data && f.hdr.seq == 1
+    })
+    .expect("ADD_OBJECT DATA");
+    let object = find(&added.payload, UbusAttr::ObjId)
+        .and_then(|a| a.as_u32())
+        .expect("object id");
+    assert_eq!(
+        find(&added.payload, UbusAttr::ObjType).is_some(),
+        typed,
+        "{shape} object type"
+    );
+    expect_status_only(&mut owner, 1, UBUS_STATUS_OK, "signature registration");
+
+    let mut caller = connect_and_wait_hello(path);
+    let mut lookup = EnvBuilder::new();
+    lookup.push_str(UbusAttr::ObjPath, "signature.object");
+    caller
+        .send(&Frame {
+            hdr: Header {
+                version: PROTO_VERSION,
+                ty: MsgType::Lookup,
+                seq: 2,
+                peer: 0,
+            },
+            payload: lookup.finish(),
+        })
+        .expect("LOOKUP signature shape");
+    if typed {
+        let data = recv_until(&mut caller, Duration::from_secs(5), |f| {
+            f.hdr.ty == MsgType::Data && f.hdr.seq == 2
+        })
+        .expect("typed LOOKUP DATA");
+        assert_eq!(
+            find(&data.payload, UbusAttr::ObjId).and_then(|a| a.as_u32()),
+            Some(object)
+        );
+        assert_eq!(
+            find(&data.payload, UbusAttr::Signature)
+                .expect("lookup signature")
+                .payload,
+            expected_signature
+        );
+    }
+    expect_status_only(
+        &mut caller,
+        2,
+        UBUS_STATUS_OK,
+        "signature LOOKUP visibility",
+    );
+}
+
+macro_rules! signature_registration_case {
+    ($name:ident, $shape:literal, $typed:literal) => {
+        acl_case!($name, arm, {
+            let acl = AclDir::with_grant(r#"{"user":"testuser","publish":["signature.*"],"access":{"signature.*":{"methods":["*"]}}}"#);
+            run_nonroot(concat!("ubusd_acl ", stringify!($name)), arm, Some(&acl), &|path| {
+                signature_registration_body(path, $shape, $typed)
+            });
+        });
+    };
+}
+
+signature_registration_case!(signature_valid_method_retains_type, "valid", true);
+signature_registration_case!(signature_empty_method_list_retains_type, "empty", true);
+signature_registration_case!(
+    signature_empty_method_name_discards_type,
+    "empty-name",
+    false
+);
+signature_registration_case!(
+    signature_missing_name_terminator_discards_type,
+    "missing-terminator",
+    false
+);
+signature_registration_case!(
+    signature_nonextended_method_discards_type,
+    "nonextended",
+    false
+);
+signature_registration_case!(
+    signature_unknown_method_type_discards_type,
+    "invalid-type",
+    false
+);
+signature_registration_case!(
+    signature_short_scalar_method_discards_type,
+    "short-int32",
+    false
+);
+signature_registration_case!(
+    signature_unterminated_string_method_discards_type,
+    "unterminated-string",
+    false
+);
+signature_registration_case!(
+    signature_mixed_valid_invalid_methods_discard_whole_type,
+    "mixed-valid-invalid",
+    false
+);
+signature_registration_case!(
+    signature_truncated_tail_keeps_complete_methods,
+    "truncated-tail",
+    true
+);
 
 fn expect_data_then_status_ok(transport: &mut UnixUbusTransport, seq: u16, what: &str) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -105,15 +105,20 @@ impl Transport for UnixUbusTransport {
         // Decode as soon as one frame is buffered. A busy producer cannot starve
         // a complete reply by keeping the socket readable indefinitely.
         loop {
-            match Codec::read_frame(&self.rx_buf) {
-                Ok((frame, consumed)) => {
-                    self.rx_buf.drain(..consumed);
-                    return Ok(Some(frame));
-                }
-                Err(UbusError::Short { .. }) => {}
-                Err(error) => {
-                    self.rx_buf.clear();
-                    return Err(error);
+            // Socket frames include the outer blob header. The codec's
+            // standalone eight-byte-header form is for in-memory users;
+            // treating that wire fragment as a frame loses its pending body.
+            if self.rx_buf.len() >= crate::wire::HEADER_SIZE + 4 {
+                match Codec::read_frame(&self.rx_buf) {
+                    Ok((frame, consumed)) => {
+                        self.rx_buf.drain(..consumed);
+                        return Ok(Some(frame));
+                    }
+                    Err(UbusError::Short { .. }) => {}
+                    Err(error) => {
+                        self.rx_buf.clear();
+                        return Err(error);
+                    }
                 }
             }
             if closed {
@@ -180,17 +185,42 @@ mod tests {
 
     #[test]
     fn partial_and_queued_frames_survive_close() {
-        let (mut peer, mut transport) = pair();
         let frame = Frame::to_broker(MsgType::Ping, 42, EnvBuilder::new().finish());
         let bytes = Codec::write_frame(&frame);
-        peer.write_all(&bytes[..10]).unwrap();
-        assert!(transport.recv().unwrap().is_none());
-        peer.write_all(&bytes[10..]).unwrap();
-        peer.write_all(&bytes).unwrap();
-        drop(peer);
-        assert_eq!(transport.recv().unwrap(), Some(frame.clone()));
-        assert_eq!(transport.recv().unwrap(), Some(frame));
-        assert!(matches!(transport.recv(), Err(UbusError::Closed)));
+        for split in 1..bytes.len() {
+            let (mut peer, mut transport) = pair();
+            peer.write_all(&bytes[..split]).unwrap();
+            assert!(transport.recv().unwrap().is_none(), "split at {split}");
+            peer.write_all(&bytes[split..]).unwrap();
+            peer.write_all(&bytes).unwrap();
+            drop(peer);
+            assert_eq!(
+                transport.recv().unwrap(),
+                Some(frame.clone()),
+                "split at {split}"
+            );
+            assert_eq!(
+                transport.recv().unwrap(),
+                Some(frame.clone()),
+                "split at {split}"
+            );
+            assert!(matches!(transport.recv(), Err(UbusError::Closed)));
+        }
+    }
+
+    #[test]
+    fn truncated_wire_header_never_becomes_a_header_only_reply() {
+        let frame = Frame::to_broker(MsgType::Hello, 0, EnvBuilder::new().finish());
+        let bytes = Codec::write_frame(&frame);
+        for split in 1..bytes.len() {
+            let (mut peer, mut transport) = pair();
+            peer.write_all(&bytes[..split]).unwrap();
+            drop(peer);
+            assert!(
+                matches!(transport.recv(), Err(UbusError::Closed)),
+                "EOF at {split} bytes"
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Degraded-I/O torture for the compat corpus.
 #
-# Gated profiles (the full parity+golden corpus must stay green under
+# Gated profiles (the full workspace must stay green under
 # each — degraded I/O must be invisible above the stream):
 #   * fragment=N   — tap-side client→broker fragmentation. Hits BOTH
 #                    brokers symmetrically (it sits on the socket stream,
@@ -47,17 +47,41 @@ set -euo pipefail
 
 run_profile() {
   local profile="$1"; shift
-  echo "== UBUS_ZERO_FAULT=${profile} :: case_3_parity case_4_golden"
-  UBUS_ZERO_FAULT="${profile}" \
-    UBUS_ZERO_COMPAT=require \
-    tools/cargo.sh test \
-      --no-default-features \
-      --features testing \
-      --test ubusd_handshake \
-      -- \
-      case_3_parity \
-      case_4_golden
+  echo "== UBUS_ZERO_FAULT=${profile} :: strict workspace"
+  exec env UBUS_ZERO_FAULT="${profile}" UBUS_ZERO_COMPAT=require \
+    python3 tools/ubus-compat-check.py
 }
 
-run_profile "fragment=3"
-run_profile "eintr_every=3"
+# Separate child environments keep the profiles independent. Capture each
+# profile's output together while exercising both profiles concurrently.
+logs="$(mktemp -d)"
+fragment_pid=
+eintr_pid=
+cleanup() {
+  for pid in "$fragment_pid" "$eintr_pid"; do
+    if [[ -n "$pid" ]]; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "$fragment_pid" "$eintr_pid"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$logs"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+run_profile "fragment=3" >"$logs/fragment" 2>&1 &
+fragment_pid=$!
+run_profile "eintr_every=3" >"$logs/eintr" 2>&1 &
+eintr_pid=$!
+status=0
+wait "$fragment_pid" || status=1
+fragment_pid=
+wait "$eintr_pid" || status=1
+eintr_pid=
+cat "$logs/fragment"
+cat "$logs/eintr"
+exit "$status"

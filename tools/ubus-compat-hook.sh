@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ -x .dep/bin/ubusd && -f .dep/bin/ubusd ]]; then
-    export UBUS_ZERO_COMPAT=require
+    exec python3 tools/ubus-compat-check.py
 fi
 
 # Runs in parallel (default thread count): the harness is parallel-safe —
@@ -10,4 +10,4 @@ fi
 # process-global `set_var`, shims compiled read-only in build.rs — and the
 # readiness barriers + contention-tolerant deadlines (docs §P7) keep it
 # deterministic under the resulting contention.
-exec tools/cargo.sh test --no-default-features --features testing --test ubusd_handshake
+exec tools/cargo.sh test --workspace --all-features --no-fail-fast

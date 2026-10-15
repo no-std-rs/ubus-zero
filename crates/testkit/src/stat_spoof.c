@@ -15,7 +15,10 @@
  *
  * Only paths under the configured prefix are touched; every other stat
  * passes through untouched, so the broker's own file accesses are
- * unaffected. Disabled entirely when the env var is unset.
+ * unaffected. Disabled entirely when the env var is unset. Tests may set
+ * UBUS_TESTKIT_STAT_UID/GID (decimal) or UBUS_TESTKIT_STAT_MODE (octal
+ * permissions) to exercise rejected ACL ownership and modes. File type is
+ * retained and these overrides apply only inside the configured prefix.
  *
  * The pinned `.dep/bin/ubusd` imports `__xstat@GLIBC_2.2.5` (the old
  * glibc ABI), so that is the primary interposer; the newer `stat`/`statx`
@@ -45,23 +48,38 @@ static int path_under_prefix(const char *path) {
     return strncmp(path, prefix, n) == 0;
 }
 
+static unsigned long configured(const char *key, unsigned long fallback, int base) {
+    const char *value = getenv(key);
+    if (!value || !*value)
+        return fallback;
+    char *end;
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, base);
+    return errno || end == value || *end ? fallback : parsed;
+}
+
+static mode_t configured_mode(mode_t mode) {
+    return (mode & S_IFMT) |
+        configured("UBUS_TESTKIT_STAT_MODE", mode & 07777 & ~(S_IWGRP | S_IWOTH), 8);
+}
+
 static void spoof_stat(struct stat *buf) {
     if (!buf) {
         return;
     }
-    buf->st_uid = 0;
-    buf->st_gid = 0;
+    buf->st_uid = configured("UBUS_TESTKIT_STAT_UID", 0, 10);
+    buf->st_gid = configured("UBUS_TESTKIT_STAT_GID", 0, 10);
     /* Some hardened ACL loaders also reject group/other-writable files. */
-    buf->st_mode &= ~(mode_t)(S_IWGRP | S_IWOTH);
+    buf->st_mode = configured_mode(buf->st_mode);
 }
 
 static void spoof_stat64(struct stat64 *buf) {
     if (!buf) {
         return;
     }
-    buf->st_uid = 0;
-    buf->st_gid = 0;
-    buf->st_mode &= ~(mode_t)(S_IWGRP | S_IWOTH);
+    buf->st_uid = configured("UBUS_TESTKIT_STAT_UID", 0, 10);
+    buf->st_gid = configured("UBUS_TESTKIT_STAT_GID", 0, 10);
+    buf->st_mode = configured_mode(buf->st_mode);
 }
 
 /* ---- old glibc ABI (__xstat family): what the pinned ubusd imports. -- */
@@ -221,9 +239,9 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask,
     }
     int rc = real(dirfd, path, flags, mask, buf);
     if (rc == 0 && buf && path_under_prefix(path)) {
-        buf->stx_uid = 0;
-        buf->stx_gid = 0;
-        buf->stx_mode &= ~(uint16_t)(S_IWGRP | S_IWOTH);
+        buf->stx_uid = configured("UBUS_TESTKIT_STAT_UID", 0, 10);
+        buf->stx_gid = configured("UBUS_TESTKIT_STAT_GID", 0, 10);
+        buf->stx_mode = configured_mode(buf->stx_mode);
     }
     return rc;
 }

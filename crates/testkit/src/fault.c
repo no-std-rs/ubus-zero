@@ -3,10 +3,11 @@
  *
  * Controls:
  *   UBUS_TESTKIT_MAX_WRITE=N
- *       Cap each intercepted write/send/sendmsg/writev call to at most
- *       N bytes, forcing partial-write handling.
+ *       Cap each intercepted write/send/sendmsg/writev call on an accepted
+ *       client socket to at most N bytes, forcing partial-write handling.
  *   UBUS_TESTKIT_EINTR_EVERY=K
- *       Fail every K-th intercepted call with EINTR before writing.
+ *       Fail every K-th intercepted client-socket call with EINTR before
+ *       writing. Files, logs, self-pipes and unmarked sockets pass through.
  *   UBUS_TESTKIT_RX_EINTR_EVERY=K
  *       Fail every K-th intercepted read/recv/recvmsg call on an
  *       accepted client socket with EINTR before consuming bytes.
@@ -32,9 +33,9 @@
  * queries yields the accept ordinal, and the fd passed to that
  * getsockopt call is the same fd the broker later writes to, so the
  * shim records fd -> "this is accept N" at query time. It also marks
- * that fd as a client socket for RX EINTR injection. Read-side injection
- * is deliberately restricted to those marked fds: ACL and /proc file
- * reads, plus the listener fd, must never be poisoned. `close()` is
+ * that fd as a client socket for TX and RX fault injection. Injection
+ * is deliberately restricted to those marked fds: ACL and /proc files,
+ * signal self-pipes, logs and the listener must never be poisoned. `close()` is
  * interposed to clear per-fd state so a recycled fd never inherits a
  * stale stall or client marker.
  *
@@ -175,6 +176,10 @@ static struct fd_stall fd_stall_table[STALL_MAX_FD];
 static unsigned char fd_is_client[STALL_MAX_FD];
 static atomic_ulong stall_accept_count = 0;
 
+static int is_client_socket(int fd) {
+    return fd >= 0 && fd < STALL_MAX_FD && fd_is_client[fd];
+}
+
 static atomic_int stall_config_ready = 0;
 static int stall_enabled = 0;
 static long stall_conn_index = 0;
@@ -229,7 +234,7 @@ static void stall_consumed(int fd, ssize_t written) {
 }
 
 static int should_rx_eintr(int fd) {
-    if (fd < 0 || fd >= STALL_MAX_FD || !fd_is_client[fd]) {
+    if (!is_client_socket(fd)) {
         return 0;
     }
     size_t every = env_usize("UBUS_TESTKIT_RX_EINTR_EVERY");
@@ -299,6 +304,9 @@ ssize_t write(int fd, const void *buf, size_t count) {
             return -1;
         }
     }
+    if (!is_client_socket(fd)) {
+        return real(fd, buf, count);
+    }
     size_t cap = 0;
     switch (stall_decide(fd, &cap)) {
         case STALL_BLOCK:
@@ -333,6 +341,9 @@ ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
             return -1;
         }
     }
+    if (!is_client_socket(sockfd)) {
+        return real(sockfd, buf, len, flags);
+    }
     size_t cap = 0;
     switch (stall_decide(sockfd, &cap)) {
         case STALL_BLOCK:
@@ -366,6 +377,10 @@ ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
             errno = ENOSYS;
             return -1;
         }
+    }
+
+    if (!is_client_socket(fd)) {
+        return real(fd, iov, iovcnt);
     }
 
     size_t stall_cap = 0;
@@ -418,6 +433,10 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
             errno = ENOSYS;
             return -1;
         }
+    }
+
+    if (!is_client_socket(sockfd)) {
+        return real(sockfd, msg, flags);
     }
 
     size_t stall_cap = 0;

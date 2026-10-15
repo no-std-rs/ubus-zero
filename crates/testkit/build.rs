@@ -12,6 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/fault.c");
     println!("cargo:rerun-if-changed=src/stat_spoof.c");
     println!("cargo:rerun-if-changed=src/path_redirect.c");
+    println!("cargo:rerun-if-changed=src/rpcd_exec_order.c");
     println!("cargo:rerun-if-env-changed=CC");
     // Tell rustc the cfg name is intentional so check-cfg doesn't warn.
     println!("cargo::rustc-check-cfg=cfg(have_libubox)");
@@ -37,6 +38,11 @@ fn main() {
         "libubus_testkit_path_redirect.so",
         &out_dir,
     );
+    let rpcd_exec_order = build_shim(
+        "src/rpcd_exec_order.c",
+        "libubus_testkit_rpcd_exec_order.so",
+        &out_dir,
+    );
 
     println!(
         "cargo:rustc-env=UBUS_TESTKIT_UID_SPOOF={}",
@@ -54,6 +60,10 @@ fn main() {
     println!(
         "cargo:rustc-env=UBUS_TESTKIT_PATH_REDIRECT={}",
         path_redirect.display()
+    );
+    println!(
+        "cargo:rustc-env=UBUS_TESTKIT_RPCD_EXEC_ORDER={}",
+        rpcd_exec_order.display()
     );
 
     // libubox-sys uses `links = "ubox"` and emits `cargo:libubox=ready`
@@ -89,6 +99,10 @@ fn embed_libubox_rpath() {
 
 fn build_shim(src: &str, so_name: &str, out_dir: &std::path::Path) -> PathBuf {
     let so_path = out_dir.join(so_name);
+    // Another Cargo invocation can rebuild this OUT_DIR while a parallel
+    // suite loads a shim. Publish a complete new inode atomically: compiling
+    // directly over the live .so can truncate it or corrupt existing mappings.
+    let staged = out_dir.join(format!(".{so_name}.{}.tmp", std::process::id()));
     let cc = env::var("CC").unwrap_or_else(|_| "cc".into());
     let status = Command::new(&cc)
         .args([
@@ -101,13 +115,14 @@ fn build_shim(src: &str, so_name: &str, out_dir: &std::path::Path) -> PathBuf {
             src,
             "-o",
         ])
-        .arg(&so_path)
+        .arg(&staged)
         .arg("-ldl")
         .status()
         .unwrap_or_else(|e| panic!("invoking {cc:?} for {src} shim failed: {e}"));
-    assert!(
-        status.success(),
-        "{src} shim build failed (cc exited {status})"
-    );
+    if !status.success() {
+        let _ = std::fs::remove_file(&staged);
+        panic!("{src} shim build failed (cc exited {status})");
+    }
+    std::fs::rename(&staged, &so_path).expect("publish complete LD_PRELOAD shim");
     so_path
 }

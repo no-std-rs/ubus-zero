@@ -29,7 +29,7 @@ echo "Running ubus compat corpus (lenient; this spawns brokers)…" >&2
 # the scenario × arm classification below. Determinism of the parse, not
 # broker isolation, is why this stays serial.
 for t in ubusd_handshake ubusd_fd_passing ubus_cli_cross ubusd_acl \
-         ubusd_lifecycle ubusd_concurrency; do
+         ubusd_lifecycle ubusd_concurrency rpcd_compat; do
     tools/cargo.sh test --no-default-features --features testing --test "$t" -- \
         --test-threads=1 --nocapture 2>&1 || true
 done >>"$raw"

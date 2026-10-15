@@ -42,12 +42,35 @@ impl UciCli {
     /// `Output`. The rpath=$ORIGIN in the built binary resolves its .so
     /// deps next to it, so no `LD_LIBRARY_PATH` juggling is needed here.
     pub fn export(&self, confdir: &Path, package: &str) -> io::Result<Output> {
-        Command::new(&self.binary)
+        // libuci otherwise searches the host's /tmp/.uci and /var/run/uci
+        // even with an explicit -c. Keep both lookup paths inside the fixture
+        // so committed-output checks cannot pick up unrelated pending deltas.
+        let mut command = Command::new(&self.binary);
+        command
             .arg("-c")
             .arg(confdir)
+            .arg("-C")
+            .arg(confdir.join(".override"))
+            .arg("-P")
+            .arg(confdir.join(".delta"))
             .arg("export")
-            .arg(package)
-            .output()
+            .arg(package);
+        #[cfg(target_os = "linux")]
+        {
+            // -P adds a new path but libuci retains its initial /tmp/.uci
+            // search entry. Redirect that entry too, in this child only.
+            let mut preload = std::env::var_os("LD_PRELOAD").unwrap_or_default();
+            crate::ubusd::append_preload(&mut preload, env!("UBUS_TESTKIT_PATH_REDIRECT"));
+            command.env("LD_PRELOAD", preload).env(
+                "UBUS_TESTKIT_PATH_MAP",
+                format!(
+                    "/tmp/.uci={},/var/run/uci={}",
+                    confdir.join(".delta").display(),
+                    confdir.join(".override").display(),
+                ),
+            );
+        }
+        command.output()
     }
 
     /// Export a package and normalize the reference output into sections.

@@ -5,7 +5,6 @@
 #![cfg(feature = "testing")]
 
 use std::path::Path;
-use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::sync::mpsc;
 use std::time::Duration;
@@ -28,7 +27,6 @@ use ubus_testkit::{LibuboxClient, LibuboxHost};
 mod common;
 
 const RECV: Duration = Duration::from_secs(5);
-const SETTLE: Duration = Duration::from_millis(25);
 
 enum PipeMarker {
     Marker(u8),
@@ -73,8 +71,6 @@ fn fd_register_typed(peer: &FdPeer, seq: u16, path: &str) -> u32 {
         },
         None,
     );
-    // ADD_OBJECT's DATA and STATUS may be adjacent in one recvmsg.  We only
-    // need DATA's object id here; a separately received STATUS is harmless.
     let (data, fd) = peer.recv_full_frame_with_fd(RECV).expect("ADD_OBJECT DATA");
     assert_eq!(data.hdr.ty, MsgType::Data);
     assert_eq!(data.hdr.seq, seq);
@@ -82,21 +78,13 @@ fn fd_register_typed(peer: &FdPeer, seq: u16, path: &str) -> u32 {
     let obj = find(&data.payload, UbusAttr::ObjId)
         .and_then(|attr| attr.as_u32())
         .expect("ADD_OBJECT OBJID");
-    // recv_full_frame_with_fd intentionally discards bytes after its decoded
-    // frame. If STATUS arrived separately, consume it before the owner starts
-    // receiving forwarded INVOKEs.
-    match peer.recv_full_frame_with_fd(Duration::from_millis(100)) {
-        Ok((status, fd)) => {
-            assert_eq!(status.hdr.ty, MsgType::Status);
-            assert_eq!(status.hdr.seq, seq);
-            assert_eq!(status_value(&status), UBUS_STATUS_OK);
-            assert!(fd.is_none(), "ADD_OBJECT STATUS fd");
-        }
-        Err(e)
-            if e.kind() == std::io::ErrorKind::TimedOut
-                || e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => panic!("ADD_OBJECT STATUS: {e}"),
-    }
+    let (status, fd) = peer
+        .recv_full_frame_with_fd(RECV)
+        .expect("ADD_OBJECT STATUS");
+    assert_eq!(status.hdr.ty, MsgType::Status);
+    assert_eq!(status.hdr.seq, seq);
+    assert_eq!(status_value(&status), UBUS_STATUS_OK);
+    assert!(fd.is_none(), "ADD_OBJECT STATUS fd");
     obj
 }
 
@@ -123,20 +111,13 @@ fn fd_register_anonymous(peer: &FdPeer, seq: u16) -> u32 {
     let obj = find(&data.payload, UbusAttr::ObjId)
         .and_then(|attr| attr.as_u32())
         .expect("anonymous ADD_OBJECT OBJID");
-    // Match `fd_register_typed`: the helper that decoded DATA may already
-    // have discarded an adjacent STATUS from the same recvmsg.
-    match peer.recv_full_frame_with_fd(Duration::from_millis(100)) {
-        Ok((status, fd)) => {
-            assert_eq!(status.hdr.ty, MsgType::Status);
-            assert_eq!(status.hdr.seq, seq);
-            assert_eq!(status_value(&status), UBUS_STATUS_OK);
-            assert!(fd.is_none(), "anonymous ADD_OBJECT STATUS fd");
-        }
-        Err(e)
-            if e.kind() == std::io::ErrorKind::TimedOut
-                || e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => panic!("anonymous ADD_OBJECT STATUS: {e}"),
-    }
+    let (status, fd) = peer
+        .recv_full_frame_with_fd(RECV)
+        .expect("anonymous ADD_OBJECT STATUS");
+    assert_eq!(status.hdr.ty, MsgType::Status);
+    assert_eq!(status.hdr.seq, seq);
+    assert_eq!(status_value(&status), UBUS_STATUS_OK);
+    assert!(fd.is_none(), "anonymous ADD_OBJECT STATUS fd");
     obj
 }
 
@@ -195,8 +176,19 @@ fn status_value(frame: &Frame) -> i32 {
         .expect("STATUS value")
 }
 
-fn read_marker(read_end: &OwnedFd, settle: Duration) -> PipeMarker {
-    std::thread::sleep(settle);
+fn read_marker(read_end: &OwnedFd, timeout: Duration) -> PipeMarker {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
+    let timeout = Timespec::try_from(timeout).expect("pipe deadline");
+    let mut fds = [PollFd::new(read_end, PollFlags::IN)];
+    loop {
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(0) => return PipeMarker::Open,
+            Ok(_) => break,
+            Err(Errno::INTR) => continue,
+            Err(e) => panic!("pipe poll: {e}"),
+        }
+    }
     let flags = fcntl_getfl(read_end).expect("get pipe flags");
     fcntl_setfl(read_end, flags | OFlags::NONBLOCK).expect("set pipe nonblocking");
     let mut byte = [0_u8; 1];
@@ -254,7 +246,7 @@ fn invoke_fd_relays_scm_rights_to_owner(#[case] arm: BrokerArm) {
     let received = received.expect("forwarded INVOKE SCM_RIGHTS");
     rustix::io::write(&received, b"f").expect("write relayed fd");
     assert!(matches!(
-        read_marker(&read_end, SETTLE),
+        read_marker(&read_end, RECV),
         PipeMarker::Marker(b'f')
     ));
     fd_send(&owner, &status(10, obj, UBUS_STATUS_OK), None);
@@ -280,8 +272,7 @@ fn reply_fd_relays_back_to_caller(#[case] arm: BrokerArm) {
     // A DATA reply carrying an fd is dropped by the broker (probed:
     // reply-direction fd rides the terminal STATUS, not DATA). Send DATA
     // separately (well-formed: ObjId + Data attr) so the caller receives
-    // it; `recv_full_frame_with_fd` never has to retain a following STATUS
-    // from the same recvmsg.
+    // it before the terminal STATUS.
     let mut data_env = EnvBuilder::new();
     data_env.push_u32(UbusAttr::ObjId, obj);
     data_env.push_data(&EnvBuilder::new().finish());
@@ -326,7 +317,7 @@ fn reply_fd_relays_back_to_caller(#[case] arm: BrokerArm) {
     let received = received.expect("STATUS SCM_RIGHTS");
     rustix::io::write(&received, b"r").expect("write relayed reply fd");
     assert!(matches!(
-        read_marker(&read_end, SETTLE),
+        read_marker(&read_end, RECV),
         PipeMarker::Marker(b'r')
     ));
 }
@@ -373,7 +364,7 @@ fn libubox_invoke_fd_relays_to_intree_owner(#[case] arm: BrokerArm) {
     let received = received.expect("libubox forwarded INVOKE SCM_RIGHTS");
     rustix::io::write(&received, b"l").expect("write relayed libubox fd");
     assert!(matches!(
-        read_marker(&read_end, SETTLE),
+        read_marker(&read_end, RECV),
         PipeMarker::Marker(b'l')
     ));
     // Reply like the other owner fixtures: hdr.peer = the caller peer the
@@ -436,13 +427,13 @@ fn libubox_request_set_fd_reaches_intree_caller(#[case] arm: BrokerArm) {
     let received = received.expect("libubox STATUS SCM_RIGHTS");
     rustix::io::write(&received, b"s").expect("write relayed reply fd");
     assert!(matches!(
-        read_marker(&read_end, SETTLE),
+        read_marker(&read_end, RECV),
         PipeMarker::Marker(b's')
     ));
     host.shutdown().expect("libubox host shutdown");
 }
 
-/// Upstream forwards an fd on a NO_REPLY NOTIFY fan-out to its sole subscriber.
+/// Upstream discards a NO_REPLY NOTIFY fd before fan-out to its subscriber.
 #[rstest]
 #[case::upstream(BrokerArm::Upstream)]
 #[case::rs(BrokerArm::Rs)]
@@ -517,7 +508,7 @@ fn fd_on_notify_fanout_follows_upstream(#[case] arm: BrokerArm) {
         "NOTIFY fan-out must not carry the publisher's fd"
     );
     assert!(
-        matches!(read_marker(&read_end, SETTLE), PipeMarker::Eof),
+        matches!(read_marker(&read_end, RECV), PipeMarker::Eof),
         "broker must close its copy of the NOTIFY fd"
     );
 }
@@ -547,10 +538,10 @@ fn second_fd_in_one_sendmsg_is_dropped(#[case] arm: BrokerArm) {
     let received = received.expect("first forwarded SCM_RIGHTS fd");
     rustix::io::write(&received, b"1").expect("write first relayed fd");
     assert!(matches!(
-        read_marker(&first_read, SETTLE),
+        read_marker(&first_read, RECV),
         PipeMarker::Marker(b'1')
     ));
-    assert!(matches!(read_marker(&second_read, SETTLE), PipeMarker::Eof));
+    assert!(matches!(read_marker(&second_read, RECV), PipeMarker::Eof));
     fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
     let (first_status, first_status_fd) = caller
         .recv_full_frame_with_fd(RECV)
@@ -592,7 +583,7 @@ fn fd_on_unroutable_invoke_is_closed(#[case] arm: BrokerArm) {
     assert_eq!(reply.hdr.ty, MsgType::Status);
     assert_eq!(status_value(&reply), UBUS_STATUS_NOT_FOUND);
     assert!(received.is_none());
-    assert!(matches!(read_marker(&read_end, SETTLE), PipeMarker::Eof));
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
 }
 
 #[rstest]
@@ -620,29 +611,13 @@ fn fd_on_nonforwarding_message_is_closed(#[case] arm: BrokerArm) {
     let (data, received) = caller.recv_full_frame_with_fd(RECV).expect("PING DATA");
     assert_eq!(data.hdr.ty, MsgType::Data);
     assert!(received.is_none());
-    assert!(matches!(read_marker(&read_end, SETTLE), PipeMarker::Eof));
-}
-
-fn current_uid() -> u32 {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .and_then(|out| out.trim().parse().ok())
-        .unwrap_or(0)
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
 }
 
 #[rstest]
 #[case::upstream(BrokerArm::Upstream)]
 #[case::rs(BrokerArm::Rs)]
 fn fd_on_acl_denied_invoke_is_closed(#[case] arm: BrokerArm) {
-    if current_uid() == 0 {
-        skip::or_skip(
-            "ubusd_fd_passing fd_on_acl_denied_invoke_is_closed",
-            "no resolvable non-root identity (running as root?)",
-        );
-    }
     let acl = unique_socket_path("fd-acl").with_extension("d");
     std::fs::create_dir_all(&acl).expect("create acl dir");
     std::fs::write(acl.join("deny.json"), r#"{"user":"example-no-such-user"}"#).expect("write acl");
@@ -650,13 +625,14 @@ fn fd_on_acl_denied_invoke_is_closed(#[case] arm: BrokerArm) {
     // Owner is root and may publish; caller is a non-root identity which has
     // no access grant. The shim assigns identities by accepted-peer order.
     let creds = "0:0:1,0:0:1,1000:1000:1";
+    let nss = [
+        ("UBUS_TESTKIT_PEERCRED_SEQ", creds),
+        ("UBUS_TESTKIT_NSS_USERS", "1000:fd-denied"),
+        ("UBUS_TESTKIT_NSS_GROUPS", "1000:fd-denied"),
+    ];
     let started = match arm {
-        BrokerArm::Upstream => {
-            UbusdHarness::start_upstream_with_acl(acl_path, &[("UBUS_TESTKIT_PEERCRED_SEQ", creds)])
-        }
-        BrokerArm::Rs => {
-            UbusdHarness::start_rust_with_acl(acl_path, &[("UBUS_TESTKIT_PEERCRED_SEQ", creds)])
-        }
+        BrokerArm::Upstream => UbusdHarness::start_upstream_with_acl(acl_path, &nss),
+        BrokerArm::Rs => UbusdHarness::start_rust_with_acl(acl_path, &nss),
     };
     let harness = match started {
         Ok(Some(harness)) => harness,
@@ -680,6 +656,527 @@ fn fd_on_acl_denied_invoke_is_closed(#[case] arm: BrokerArm) {
     assert_eq!(reply.hdr.ty, MsgType::Status);
     assert_eq!(status_value(&reply), UBUS_STATUS_PERMISSION_DENIED);
     assert!(received.is_none());
-    assert!(matches!(read_marker(&read_end, SETTLE), PipeMarker::Eof));
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
     let _ = std::fs::remove_dir_all(acl);
+}
+
+fn assert_fd_marker(received: Option<OwnedFd>, read_end: &OwnedFd, marker: u8) {
+    let received = received.expect("forwarded SCM_RIGHTS");
+    let flags = rustix::io::fcntl_getfd(&received).expect("descriptor flags");
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    rustix::io::write(&received, &[marker]).expect("write forwarded pipe");
+    assert!(matches!(read_marker(read_end, RECV), PipeMarker::Marker(value) if value == marker));
+    drop(received);
+    assert!(
+        matches!(read_marker(read_end, RECV), PipeMarker::Eof),
+        "broker must release its forwarded descriptor copy"
+    );
+}
+
+fn expect_ok(peer: &FdPeer, seq: u16) {
+    let (reply, fd) = peer.recv_full_frame_with_fd(RECV).expect("terminal STATUS");
+    assert_eq!(reply.hdr.ty, MsgType::Status);
+    assert_eq!(reply.hdr.seq, seq);
+    assert_eq!(status_value(&reply), UBUS_STATUS_OK);
+    assert!(fd.is_none());
+}
+
+fn owner_data_reply(forwarded: &Frame, obj: u32, data: &[u8]) -> Frame {
+    let mut env = EnvBuilder::new();
+    env.push_u32(UbusAttr::ObjId, obj);
+    env.push_data(data);
+    Frame::to_peer(
+        MsgType::Data,
+        forwarded.hdr.seq,
+        forwarded.hdr.peer,
+        env.finish(),
+    )
+}
+
+/// An fd received with an incomplete header remains attached through all
+/// subsequent header/body reads, rather than closing or moving to a successor.
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn fragmented_invoke_retains_fd(
+    #[case] arm: BrokerArm,
+    #[values(1, 7, 8, 11, 12, 24)] split: usize,
+) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.fragmented");
+    let bytes = Codec::write_frame(&invoke(60, obj, "ping", &[]));
+    let (read_end, write_end) = pipe().expect("pipe");
+    caller
+        .send_frame_with_fd(&bytes[..split], Some(write_end.as_fd()))
+        .expect("first fragment");
+    drop(write_end);
+    // A negative socket read is an observable partial-frame assertion; the
+    // descriptor must remain alive while no complete request can be forwarded.
+    let error = owner
+        .recv_full_frame_with_fd(Duration::from_millis(10))
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ));
+    caller
+        .send_frame_with_fd(&bytes[split..], None)
+        .expect("remaining frame");
+    let (forwarded, received) = owner
+        .recv_full_frame_with_fd(RECV)
+        .expect("fragmented INVOKE");
+    assert_eq!(forwarded.hdr.seq, 60);
+    assert_fd_marker(received, &read_end, b'f');
+    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    expect_ok(&caller, 60);
+}
+
+/// The ancillary window is the eight-byte UBUS header plus the four-byte
+/// outer blob header. An fd attached inside the body must be discarded.
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn invoke_fd_at_header_body_boundary(
+    #[case] arm: BrokerArm,
+    #[values(1, 7, 8, 11, 12, 20)] offset: usize,
+) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.window");
+    let bytes = Codec::write_frame(&invoke(61, obj, "ping", &[]));
+    let (read_end, write_end) = pipe().expect("pipe");
+    caller
+        .send_frame_with_fd(&bytes[..offset], None)
+        .expect("plain prefix");
+    caller
+        .send_frame_with_fd(&bytes[offset..], Some(write_end.as_fd()))
+        .expect("ancillary suffix");
+    drop(write_end);
+    let (forwarded, received) = owner.recv_full_frame_with_fd(RECV).expect("window INVOKE");
+    assert_eq!(forwarded.hdr.seq, 61);
+    if offset < 12 {
+        assert_fd_marker(received, &read_end, b'w');
+    } else {
+        assert!(
+            received.is_none(),
+            "body-only fd at offset {offset} must not be relayed"
+        );
+        assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    }
+    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    expect_ok(&caller, 61);
+}
+
+/// A plain request queued immediately before an fd-bearing request must not
+/// steal its SCM_RIGHTS, even if one recvmsg could read bytes from both writes.
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn pipelined_plain_and_fd_invokes_keep_descriptor_association(#[case] arm: BrokerArm) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.pipeline");
+    let mut pipes = Vec::new();
+    for index in 0..16_u16 {
+        let seq = 80 + index;
+        let (read_end, write_end) = pipe().expect("pipeline pipe");
+        fd_send(
+            &caller,
+            &invoke(seq, obj, "ping", &[]),
+            (index % 3 != 0).then_some(write_end.as_fd()),
+        );
+        drop(write_end);
+        pipes.push(read_end);
+    }
+    for (index, read_end) in pipes.iter().enumerate() {
+        let (forwarded, received) = owner
+            .recv_full_frame_with_fd(RECV)
+            .expect("pipelined INVOKE");
+        assert_eq!(forwarded.hdr.ty, MsgType::Invoke);
+        assert_eq!(forwarded.hdr.seq, 80 + index as u16);
+        if index % 3 != 0 {
+            assert_fd_marker(received, read_end, index as u8);
+        } else {
+            assert!(
+                received.is_none(),
+                "plain request {index} stole a successor's fd"
+            );
+            assert!(matches!(read_marker(read_end, RECV), PipeMarker::Eof));
+        }
+        fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    }
+    for seq in 80..96 {
+        expect_ok(&caller, seq);
+    }
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn adjacent_data_and_fd_status_keep_reply_association(#[case] arm: BrokerArm) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.adjacent-replies");
+    fd_send(&caller, &invoke(100, obj, "ping", &[]), None);
+    let (forwarded, _) = owner.recv_full_frame_with_fd(RECV).expect("INVOKE");
+    let (read_end, write_end) = pipe().expect("reply pipe");
+    fd_send(&owner, &owner_data_reply(&forwarded, obj, &[]), None);
+    fd_send(
+        &owner,
+        &owner_status_reply(&forwarded, obj),
+        Some(write_end.as_fd()),
+    );
+    drop(write_end);
+    let (data, received) = caller.recv_full_frame_with_fd(RECV).expect("adjacent DATA");
+    assert_eq!(data.hdr.ty, MsgType::Data);
+    assert_eq!(data.hdr.seq, 100);
+    assert!(received.is_none(), "DATA stole terminal STATUS fd");
+    let (reply, received) = caller
+        .recv_full_frame_with_fd(RECV)
+        .expect("adjacent STATUS");
+    assert_eq!(reply.hdr.ty, MsgType::Status);
+    assert_eq!(status_value(&reply), UBUS_STATUS_OK);
+    assert_fd_marker(received, &read_end, b'r');
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn descriptor_on_data_reply_is_closed_without_dropping_data(#[case] arm: BrokerArm) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.data-close");
+    fd_send(&caller, &invoke(101, obj, "ping", &[]), None);
+    let (forwarded, _) = owner.recv_full_frame_with_fd(RECV).expect("INVOKE");
+    let (read_end, write_end) = pipe().expect("DATA pipe");
+    fd_send(
+        &owner,
+        &owner_data_reply(&forwarded, obj, &[]),
+        Some(write_end.as_fd()),
+    );
+    drop(write_end);
+    let (data, received) = caller
+        .recv_full_frame_with_fd(RECV)
+        .expect("DATA without fd");
+    assert_eq!(data.hdr.ty, MsgType::Data);
+    assert!(received.is_none(), "DATA descriptors are not forwarded");
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    expect_ok(&caller, 101);
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn descriptor_on_forged_owner_response_is_closed(#[case] arm: BrokerArm) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.forged-response");
+    fd_send(&caller, &invoke(102, obj, "ping", &[]), None);
+    let (forwarded, _) = owner.recv_full_frame_with_fd(RECV).expect("INVOKE");
+    let forger = FdPeer::connect(harness.socket_path()).expect("forger connect");
+    fd_hello(&forger);
+    let (read_end, write_end) = pipe().expect("forged pipe");
+    fd_send(
+        &forger,
+        &owner_status_reply(&forwarded, obj),
+        Some(write_end.as_fd()),
+    );
+    drop(write_end);
+    // Observe disposal through pipe EOF; no timing guess or parent env change.
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    expect_ok(&caller, 102);
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn disconnect_with_incomplete_fd_frame_closes_descriptor(
+    #[case] arm: BrokerArm,
+    #[values(1, 7, 8, 11, 12, 24)] prefix: usize,
+) {
+    let Some(harness) = start(arm) else { return };
+    let (_owner, obj, caller, _) = peers(harness.socket_path(), "fd.partial-close");
+    let (read_end, write_end) = pipe().expect("partial pipe");
+    let bytes = Codec::write_frame(&invoke(103, obj, "ping", &[]));
+    caller
+        .send_frame_with_fd(&bytes[..prefix], Some(write_end.as_fd()))
+        .expect("partial INVOKE");
+    drop(write_end);
+    drop(caller);
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    let fresh = FdPeer::connect(harness.socket_path()).expect("fresh peer");
+    fd_hello(&fresh);
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn malformed_fd_frame_closes_descriptor(
+    #[case] arm: BrokerArm,
+    #[values(0_u32, 3, 0x00ff_ffff)] length: u32,
+) {
+    let Some(harness) = start(arm) else { return };
+    let caller = FdPeer::connect(harness.socket_path()).expect("caller connect");
+    fd_hello(&caller);
+    let mut bytes = Header {
+        version: PROTO_VERSION,
+        ty: MsgType::Invoke,
+        seq: 104,
+        peer: 0,
+    }
+    .encode()
+    .to_vec();
+    bytes.extend_from_slice(&length.to_be_bytes());
+    let (read_end, write_end) = pipe().expect("malformed pipe");
+    caller
+        .send_frame_with_fd(&bytes, Some(write_end.as_fd()))
+        .expect("malformed fd frame");
+    drop(write_end);
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    assert_eq!(
+        caller.recv_full_frame_with_fd(RECV).unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+    let fresh = FdPeer::connect(harness.socket_path()).expect("fresh peer");
+    fd_hello(&fresh);
+}
+
+/// Exercise independent SCM_RIGHTS routes concurrently in the same daemon.
+/// Markers identify each pipe and each request, catching cross-peer fd reuse.
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn concurrent_descriptor_routes_do_not_cross_peers(#[case] arm: BrokerArm) {
+    let Some(harness) = start(arm) else { return };
+    let path = harness.socket_path().to_owned();
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for lane in 0..8_u8 {
+            let path = &path;
+            workers.push(scope.spawn(move || {
+                let (owner, obj, caller, _) = peers(path, &format!("fd.concurrent.{lane}"));
+                for index in 0..16_u16 {
+                    let seq = 200 + index;
+                    let marker = lane.wrapping_mul(16) + index as u8;
+                    let (read_end, write_end) = pipe().expect("concurrent pipe");
+                    fd_send(
+                        &caller,
+                        &invoke(seq, obj, "ping", &[]),
+                        Some(write_end.as_fd()),
+                    );
+                    drop(write_end);
+                    let (forwarded, received) = owner
+                        .recv_full_frame_with_fd(RECV)
+                        .expect("concurrent INVOKE");
+                    assert_eq!(forwarded.hdr.seq, seq);
+                    assert_fd_marker(received, &read_end, marker);
+                    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+                    expect_ok(&caller, seq);
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("concurrent descriptor route");
+        }
+    });
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn fragmented_terminal_status_retains_reply_fd(
+    #[case] arm: BrokerArm,
+    #[values(1, 7, 8, 11, 12, 20)] split: usize,
+) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.fragmented-status");
+    fd_send(&caller, &invoke(105, obj, "ping", &[]), None);
+    let (forwarded, _) = owner.recv_full_frame_with_fd(RECV).expect("INVOKE");
+    let bytes = Codec::write_frame(&owner_status_reply(&forwarded, obj));
+    let (read_end, write_end) = pipe().expect("fragmented reply pipe");
+    owner
+        .send_frame_with_fd(&bytes[..split], Some(write_end.as_fd()))
+        .expect("reply first fragment");
+    drop(write_end);
+    let error = caller
+        .recv_full_frame_with_fd(Duration::from_millis(10))
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ));
+    owner
+        .send_frame_with_fd(&bytes[split..], None)
+        .expect("remaining reply");
+    let (reply, received) = caller
+        .recv_full_frame_with_fd(RECV)
+        .expect("fragmented reply STATUS");
+    assert_eq!(reply.hdr.ty, MsgType::Status);
+    assert_eq!(reply.hdr.seq, 105);
+    assert_eq!(status_value(&reply), UBUS_STATUS_OK);
+    assert_fd_marker(received, &read_end, b's');
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn fd_on_invalid_owner_response_is_closed(
+    #[case] arm: BrokerArm,
+    #[values("missing-object", "missing-status", "missing-caller")] invalid: &str,
+) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.invalid-status");
+    fd_send(&caller, &invoke(106, obj, "ping", &[]), None);
+    let (forwarded, _) = owner.recv_full_frame_with_fd(RECV).expect("INVOKE");
+    let mut env = EnvBuilder::new();
+    if invalid != "missing-object" {
+        env.push_u32(UbusAttr::ObjId, obj);
+    }
+    if invalid != "missing-status" {
+        env.push_u32(UbusAttr::Status, UBUS_STATUS_OK as u32);
+    }
+    let reply = Frame::to_peer(
+        MsgType::Status,
+        106,
+        if invalid == "missing-caller" {
+            0
+        } else {
+            forwarded.hdr.peer
+        },
+        env.finish(),
+    );
+    let (read_end, write_end) = pipe().expect("invalid STATUS pipe");
+    fd_send(&owner, &reply, Some(write_end.as_fd()));
+    drop(write_end);
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    // Invalid replies must neither satisfy nor disconnect the real caller.
+    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    expect_ok(&caller, 106);
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn non_relay_message_types_close_received_descriptors(
+    #[case] arm: BrokerArm,
+    #[values(
+        MsgType::Hello,
+        MsgType::Data,
+        MsgType::Lookup,
+        MsgType::AddObject,
+        MsgType::RemoveObject,
+        MsgType::Subscribe,
+        MsgType::Unsubscribe,
+        MsgType::Notify,
+        MsgType::Monitor
+    )]
+    ty: MsgType,
+) {
+    let Some(harness) = start(arm) else { return };
+    let caller = FdPeer::connect(harness.socket_path()).expect("caller connect");
+    fd_hello(&caller);
+    let (read_end, write_end) = pipe().expect("non-relay pipe");
+    fd_send(
+        &caller,
+        &Frame::to_broker(ty, 107, EnvBuilder::new().finish()),
+        Some(write_end.as_fd()),
+    );
+    drop(write_end);
+    assert!(
+        matches!(read_marker(&read_end, RECV), PipeMarker::Eof),
+        "{ty:?} must close a descriptor rather than retaining it"
+    );
+    let fresh = FdPeer::connect(harness.socket_path()).expect("fresh peer");
+    fd_hello(&fresh);
+}
+
+/// Descriptor-free receive batches can span many complete frames plus a
+/// partial header. A following SCM_RIGHTS must still bind only to its INVOKE.
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn fd_after_large_plain_batch_keeps_its_frame(
+    #[case] arm: BrokerArm,
+    #[values(0_u16, 1, 64, 127)] plain: u16,
+) {
+    run_fd_after_plain_batch(arm, plain);
+}
+
+// The pinned upstream broker copies a queued external-buffer message without
+// transferring its fd ownership, closing a queued descriptor prematurely. Keep
+// that upstream bug out of the parity contract while verifying Rust's queue.
+#[test]
+fn queued_descriptor_after_large_plain_batch_remains_usable() {
+    run_fd_after_plain_batch(BrokerArm::Rs, 1024);
+}
+
+fn run_fd_after_plain_batch(arm: BrokerArm, plain: u16) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.plain-batch");
+    let mut batch = Vec::new();
+    for index in 0..plain {
+        batch.extend_from_slice(&Codec::write_frame(&invoke(400 + index, obj, "ping", &[])));
+    }
+    caller
+        .send_frame_with_fd(&batch, None)
+        .expect("plain batch");
+    let (read_end, write_end) = pipe().expect("batched pipe");
+    fd_send(
+        &caller,
+        &invoke(400 + plain, obj, "ping", &[]),
+        Some(write_end.as_fd()),
+    );
+    drop(write_end);
+    for index in 0..=plain {
+        let (forwarded, received) = owner.recv_full_frame_with_fd(RECV).expect("batched INVOKE");
+        assert_eq!(forwarded.hdr.ty, MsgType::Invoke);
+        assert_eq!(forwarded.hdr.seq, 400 + index);
+        if index == plain {
+            assert_fd_marker(received, &read_end, b'b');
+        } else {
+            assert!(
+                received.is_none(),
+                "plain request {index} must not steal the trailing fd"
+            );
+        }
+        fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    }
+    for index in 0..=plain {
+        expect_ok(&caller, 400 + index);
+    }
+}
+
+#[rstest]
+#[case::upstream(BrokerArm::Upstream)]
+#[case::rs(BrokerArm::Rs)]
+fn descriptor_in_large_invoke_body_is_closed(
+    #[case] arm: BrokerArm,
+    #[values(4095, 4096, 4097, 65535)] offset: usize,
+) {
+    let Some(harness) = start(arm) else { return };
+    let (owner, obj, caller, _) = peers(harness.socket_path(), "fd.large-body");
+    let frame = invoke(1500, obj, "ping", &vec![b'x'; 64 * 1024]);
+    let bytes = Codec::write_frame(&frame);
+    caller
+        .send_frame_with_fd(&bytes[..offset], None)
+        .expect("large plain prefix");
+    let (read_end, write_end) = pipe().expect("large-body pipe");
+    caller
+        .send_frame_with_fd(&bytes[offset..offset + 1], Some(write_end.as_fd()))
+        .expect("body descriptor byte");
+    drop(write_end);
+    // Pipe EOF observes the broker consuming the ancillary byte. Only then
+    // queue the remaining body: upstream's edge-triggered body reader needs a
+    // new readiness event after a short read ending at an ancillary barrier.
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    caller
+        .send_frame_with_fd(&bytes[offset + 1..], None)
+        .expect("remaining large body");
+    let (forwarded, received) = owner.recv_full_frame_with_fd(RECV).expect("large INVOKE");
+    assert_eq!(forwarded.hdr.ty, MsgType::Invoke);
+    assert_eq!(forwarded.hdr.seq, 1500);
+    assert!(
+        received.is_none(),
+        "fd inside a large body must not bind to the frame header"
+    );
+    assert!(matches!(read_marker(&read_end, RECV), PipeMarker::Eof));
+    fd_send(&owner, &owner_status_reply(&forwarded, obj), None);
+    expect_ok(&caller, 1500);
 }

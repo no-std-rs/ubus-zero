@@ -98,7 +98,7 @@ jobs:
         run: cargo build -p ubusd --features testing
 
       - name: Strict workspace suite
-        run: cargo test --workspace --all-features
+        run: python3 tools/ubus-compat-check.py
 
       - name: Fault-profile parity
         run: tools/ubus-fault-check.sh
@@ -130,4 +130,4 @@ jobs:
         run: cargo build -p ubusd --features testing
 
       - name: Strict matrix against OpenWrt master
-        run: cargo test --all-features --test ubusd_handshake
+        run: python3 tools/ubus-compat-check.py

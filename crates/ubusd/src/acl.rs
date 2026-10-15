@@ -4,7 +4,6 @@
 //! peer credentials onto [`Cred`] and decides where each protocol operation
 //! should be checked.
 
-use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -80,6 +79,10 @@ impl AccessGrant {
 pub struct AclEntry {
     pub user: Option<String>,
     pub group: Option<String>,
+    /// Names are resolved when the file is loaded. Unresolvable configured
+    /// identities are discarded; numeric zero remains a valid resolved id.
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub publish: Vec<Pattern>,
     pub subscribe: Vec<Pattern>,
     pub listen: Vec<Pattern>,
@@ -89,19 +92,31 @@ pub struct AclEntry {
 
 impl AclEntry {
     pub fn matches_cred(&self, user: Option<&str>, group: Option<&str>) -> bool {
-        self.user
-            .as_deref()
-            .is_some_and(|entry_user| user == Some(entry_user))
-            || self
-                .group
+        if let Some(entry_user) = self.user.as_deref() {
+            user == Some(entry_user)
+        } else {
+            self.group
                 .as_deref()
                 .is_some_and(|entry_group| group == Some(entry_group))
+        }
+    }
+
+    fn matches_peer(&self, cred: &Cred) -> bool {
+        if let Some(uid) = self.uid {
+            cred.uid == Some(uid)
+        } else if let Some(gid) = self.gid {
+            cred.gid == Some(gid) || cred.extra_gids.contains(&gid)
+        } else {
+            self.matches_cred(cred.user.as_deref(), cred.group.as_deref())
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Cred {
     pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub extra_gids: Vec<u32>,
     pub user: Option<String>,
     pub group: Option<String>,
 }
@@ -147,7 +162,7 @@ impl AclRegistry {
         }
 
         self.entries.iter().any(|entry| {
-            entry.matches_cred(cred.user.as_deref(), cred.group.as_deref())
+            entry.matches_peer(cred)
                 && match op {
                     AclOp::Publish => entry.publish.iter().any(|pattern| pattern.matches(path)),
                     AclOp::Subscribe => entry.subscribe.iter().any(|pattern| pattern.matches(path)),
@@ -163,7 +178,8 @@ impl AclRegistry {
         })
     }
 
-    /// Load every valid root-owned, non-group/other-writable `*.json` file.
+    /// Load root-owned regular `*.json` files without group/other write or
+    /// other execute permission, matching upstream's file safety checks.
     /// Individual files are intentionally best-effort: invalid ACL material
     /// never prevents the broker from starting with the remaining entries.
     pub fn load_dir(dir: &str) -> AclLoad {
@@ -225,7 +241,7 @@ pub(crate) enum AclError {
     InvalidPath,
     #[error("stat failed: {0}")]
     Stat(#[source] io::Error),
-    #[error("ACL file is not a root-owned regular file without group or other write permission")]
+    #[error("ACL file is not a root-owned regular file without group/other write or other execute permission")]
     UnsafeFile,
     #[error("read failed: {0}")]
     Read(#[source] io::Error),
@@ -246,41 +262,72 @@ fn load_one(path: &Path) -> Result<Vec<AclEntry>, AclError> {
     if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG
         || stat.st_uid != 0
         || stat.st_gid != 0
-        || (stat.st_mode & 0o022) != 0
+        || (stat.st_mode & 0o023) != 0
     {
         return Err(AclError::UnsafeFile);
     }
 
     let bytes = fs::read(path).map_err(AclError::Read)?;
-    parse_file(&bytes)
+    let entries = parse_file(&bytes)?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|mut entry| {
+            let (name, is_group) = if let Some(user) = entry.user.as_deref() {
+                (user, false)
+            } else if let Some(group) = entry.group.as_deref() {
+                (group, true)
+            } else {
+                return None;
+            };
+            let Some(id) = resolve_name(name, is_group) else {
+                log::warn!(
+                    "ubusd: skipping ACL for unknown {} {name} in {}",
+                    if is_group { "group" } else { "user" },
+                    path.display()
+                );
+                return None;
+            };
+            if is_group {
+                entry.gid = Some(id);
+            } else {
+                entry.uid = Some(id);
+            }
+            Some(entry)
+        })
+        .collect())
 }
 
 #[derive(Deserialize)]
 struct RawAclFile {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string")]
     user: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "optional_string")]
     group: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_array")]
     publish: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_array")]
     subscribe: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_array")]
     listen: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "string_array")]
     send: Vec<String>,
     #[serde(default)]
-    access: BTreeMap<String, RawAccess>,
+    access: Option<OrderedJson>,
 }
 
-#[derive(Deserialize)]
-struct RawAccess {
-    #[serde(default)]
-    methods: Option<serde_json::Value>,
-    #[serde(default)]
-    tags: Option<serde_json::Value>,
-    #[serde(default)]
-    acl: Option<OrderedJson>,
+fn optional_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::to_owned))
+}
+
+fn string_array<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+        .collect())
 }
 
 /// JSON value retaining object key order. `serde_json::Value` is unsuitable
@@ -466,21 +513,47 @@ pub(crate) fn append_priv_blob(builder: &mut BlobBuilder, bytes: &[u8]) -> Resul
 
 pub(crate) fn parse_file(bytes: &[u8]) -> Result<Vec<AclEntry>, AclError> {
     let raw: RawAclFile = serde_json::from_slice(bytes)?;
-    let mut access = Vec::with_capacity(raw.access.len());
-    for (object, grant) in raw.access {
-        let methods = grant.methods.as_ref().and_then(|value| {
-            value.as_array().map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-        });
-        let has_tags = grant.tags.as_ref().is_some_and(serde_json::Value::is_array);
-        let priv_blob = match grant.acl {
-            Some(value) => encode_priv_table(value)?,
-            None => None,
+    let (user, group) = if let Some(user) = raw.user {
+        (Some(user), None)
+    } else {
+        (None, raw.group)
+    };
+    if user.is_none() && group.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut access = Vec::new();
+    let grants = match raw.access {
+        Some(OrderedJson::Object(fields)) => fields,
+        _ => Vec::new(),
+    };
+    for (object, grant) in grants {
+        if object.is_empty() {
+            continue;
+        }
+        let OrderedJson::Object(fields) = grant else {
+            continue;
         };
+        let mut methods = None;
+        let mut has_tags = false;
+        let mut priv_blob = None;
+        for (name, value) in fields {
+            match (name.as_str(), value) {
+                ("methods", OrderedJson::Array(values)) => {
+                    methods = Some(
+                        values
+                            .into_iter()
+                            .filter_map(|value| match value {
+                                OrderedJson::String(method) => Some(method),
+                                _ => None,
+                            })
+                            .collect(),
+                    );
+                }
+                ("tags", OrderedJson::Array(_)) => has_tags = true,
+                ("acl", value @ OrderedJson::Object(_)) => priv_blob = encode_priv_table(value)?,
+                _ => {}
+            }
+        }
         if methods.is_some() || has_tags || priv_blob.is_some() {
             access.push(AccessGrant {
                 object: Pattern::parse(&object),
@@ -490,8 +563,10 @@ pub(crate) fn parse_file(bytes: &[u8]) -> Result<Vec<AclEntry>, AclError> {
         }
     }
     Ok(vec![AclEntry {
-        user: raw.user,
-        group: raw.group,
+        user,
+        group,
+        uid: None,
+        gid: None,
         publish: raw
             .publish
             .iter()
@@ -516,6 +591,60 @@ pub(crate) fn parse_file(bytes: &[u8]) -> Result<Vec<AclEntry>, AclError> {
     }])
 }
 
+/// Reentrant NSS reads preserve numeric ACL identity across aliases and avoid
+/// a second name lookup during each authorization check.
+fn resolve_name(name: &str, group: bool) -> Option<u32> {
+    let name = CString::new(name).ok()?;
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let (rc, id) = if group {
+            let mut entry = core::mem::MaybeUninit::<libc::group>::uninit();
+            let mut result = core::ptr::null_mut();
+            let rc = unsafe {
+                libc::getgrnam_r(
+                    name.as_ptr(),
+                    entry.as_mut_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut result,
+                )
+            };
+            (
+                rc,
+                if rc == 0 && !result.is_null() {
+                    Some(unsafe { entry.assume_init() }.gr_gid)
+                } else {
+                    None
+                },
+            )
+        } else {
+            let mut entry = core::mem::MaybeUninit::<libc::passwd>::uninit();
+            let mut result = core::ptr::null_mut();
+            let rc = unsafe {
+                libc::getpwnam_r(
+                    name.as_ptr(),
+                    entry.as_mut_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut result,
+                )
+            };
+            (
+                rc,
+                if rc == 0 && !result.is_null() {
+                    Some(unsafe { entry.assume_init() }.pw_uid)
+                } else {
+                    None
+                },
+            )
+        };
+        if rc != libc::ERANGE {
+            return id;
+        }
+        buf.resize(buf.len().checked_mul(2)?, 0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +653,8 @@ mod tests {
         AclEntry {
             user: user.map(str::to_string),
             group: group.map(str::to_string),
+            uid: None,
+            gid: None,
             publish: vec![Pattern::parse("example.*")],
             subscribe: vec![Pattern::parse("pub.sub")],
             listen: vec![Pattern::parse("ev.*")],
@@ -539,6 +670,8 @@ mod tests {
     fn cred(user: Option<&str>, group: Option<&str>) -> Cred {
         Cred {
             uid: Some(1000),
+            gid: None,
+            extra_gids: Vec::new(),
             user: user.map(str::to_string),
             group: group.map(str::to_string),
         }
@@ -606,12 +739,12 @@ mod tests {
     }
 
     #[test]
-    fn credentials_match_user_or_group_but_not_an_unbound_entry() {
+    fn credentials_prefer_user_over_group_and_reject_unbound_entries() {
         assert!(entry(Some("alice"), None).matches_cred(Some("alice"), None));
         assert!(entry(None, Some("dialout")).matches_cred(None, Some("dialout")));
         let both = entry(Some("alice"), Some("dialout"));
         assert!(both.matches_cred(Some("alice"), Some("other")));
-        assert!(both.matches_cred(Some("other"), Some("dialout")));
+        assert!(!both.matches_cred(Some("other"), Some("dialout")));
         assert!(!both.matches_cred(Some("other"), Some("other")));
         assert!(!entry(None, None).matches_cred(Some("alice"), Some("dialout")));
         assert!(!entry(Some("unknown"), None).matches_cred(Some("alice"), None));
@@ -670,7 +803,8 @@ mod tests {
         use ubus::blobmsg::{lookup, BlobIter, BlobValue};
 
         let entries =
-            parse_file(br#"{"access":{"svc":{"acl":{"zeta":1,"alpha":2}}}}"#).expect("ACL parses");
+            parse_file(br#"{"user":"root","access":{"svc":{"acl":{"zeta":1,"alpha":2}}}}"#)
+                .expect("ACL parses");
         let blob = entries[0].access[0]
             .priv_blob
             .as_deref()
@@ -693,8 +827,9 @@ mod tests {
     fn priv_table_retains_custom_string_and_int32() {
         use ubus::blobmsg::{lookup, BlobValue};
 
-        let entries = parse_file(br#"{"access":{"svc":{"acl":{"custom":"tag","n":7}}}}"#)
-            .expect("ACL parses");
+        let entries =
+            parse_file(br#"{"user":"root","access":{"svc":{"acl":{"custom":"tag","n":7}}}}"#)
+                .expect("ACL parses");
         let blob = entries[0].access[0]
             .priv_blob
             .as_deref()

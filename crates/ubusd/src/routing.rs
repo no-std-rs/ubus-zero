@@ -105,7 +105,7 @@ pub fn dispatch(
         MsgType::RemoveObject => {
             dispatch_remove_object(frame, src_peer, peers, objects, subs, events)
         }
-        MsgType::Lookup => dispatch_lookup(frame, src_peer, objects),
+        MsgType::Lookup => dispatch_lookup(frame, src_peer, &cred, acl, objects),
         MsgType::Invoke => dispatch_invoke(
             frame,
             src_peer,
@@ -155,7 +155,8 @@ fn dispatch_add_object(
     subs: &mut SubscriberRegistry,
     events: &mut EventRegistry,
 ) -> Vec<Action> {
-    let signature = find(&frame.payload, UbusAttr::Signature).map(|a| a.as_blobmsg().to_vec());
+    let signature = find(&frame.payload, UbusAttr::Signature)
+        .and_then(|attr| object_signature(attr.as_blobmsg()));
     // Named objects broadcast `ubus.object.add` once registered; capture
     // the path so we can mint that event after the owner's reply.
     let mut named_path: Option<String> = None;
@@ -339,7 +340,54 @@ fn add_or_remove_reply(
     ]
 }
 
-fn dispatch_lookup(frame: &Frame, src_peer: PeerId, objects: &ObjectRegistry) -> Vec<Action> {
+/// Mirror ubus_create_obj_type's method walk. A malformed declared method
+/// discards the entire type, while an incomplete trailing attr stops the
+/// blob_for_each_attr walk and retains the complete methods before it.
+fn object_signature(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut remaining = bytes;
+    let mut signature = Vec::new();
+    while remaining.len() >= 4 {
+        let raw_len =
+            (u32::from_be_bytes(remaining[..4].try_into().unwrap()) & 0x00ff_ffff) as usize;
+        let padded = ubus::blob::align4(raw_len);
+        if padded < 4 || padded > remaining.len() {
+            break;
+        }
+        let (attr, _) = ubus::blob::BlobAttr::parse(remaining).ok()?;
+        if !attr.extended || attr.id > 8 || attr.payload.len() < 2 {
+            return None;
+        }
+        let name_len = u16::from_be_bytes(attr.payload[..2].try_into().unwrap()) as usize;
+        let data_start = ubus::blob::align4(2 + name_len + 1);
+        if name_len == 0 || data_start > attr.payload.len() || attr.payload[2 + name_len] != 0 {
+            return None;
+        }
+        let data = &attr.payload[data_start..];
+        let valid = match attr.id {
+            3 => !data.is_empty() && data.last() == Some(&0),
+            4 => data.len() == 8,
+            5 => data.len() == 4,
+            6 => data.len() == 2,
+            7 => data.len() == 1,
+            8 => data.len() >= 8,
+            _ => true,
+        };
+        if !valid {
+            return None;
+        }
+        signature.extend_from_slice(&remaining[..padded]);
+        remaining = &remaining[padded..];
+    }
+    Some(signature)
+}
+
+fn dispatch_lookup(
+    frame: &Frame,
+    src_peer: PeerId,
+    cred: &Cred,
+    acl: &AclRegistry,
+    objects: &ObjectRegistry,
+) -> Vec<Action> {
     // If the caller didn't include a path attr we treat it as "list
     // everything" — matches libubus for `ubus list`. libubox drops an
     // ObjPath whose payload is not a NUL-terminated string, so it is
@@ -379,16 +427,45 @@ fn dispatch_lookup(frame: &Frame, src_peer: PeerId, objects: &ObjectRegistry) ->
         _ => sorted_typed_paths(objects),
     };
     for (id, path) in matches {
+        let obj_type = objects
+            .type_of(id)
+            .expect("typed LOOKUP match must still have ObjectType");
+        let signature = obj_type.signature();
+        let filtered;
+        let signature = if cred.uid == Some(0) {
+            signature
+        } else {
+            let mut remaining = signature;
+            let mut allowed = Vec::new();
+            let mut declared = 0;
+            while let Ok((_, consumed)) = ubus::blob::BlobAttr::parse(remaining) {
+                declared += 1;
+                let raw = &remaining[..consumed];
+                if let Some(method) = ubus::blobmsg::BlobIter::new(raw)
+                    .next()
+                    .and_then(|attr| attr.name)
+                {
+                    if acl.check(cred, &path, AclOp::Access, Some(method)) {
+                        allowed.extend_from_slice(raw);
+                    }
+                }
+                remaining = &remaining[consumed..];
+            }
+            if declared > 0 && allowed.is_empty() {
+                continue;
+            }
+            filtered = allowed;
+            filtered.as_slice()
+        };
         out.push(Action::send(
             src_peer,
-            reply::lookup_data(
+            reply::lookup_data_with_signature(
                 frame.hdr.seq,
                 frame.hdr.peer,
                 id,
                 &path,
-                objects
-                    .type_of(id)
-                    .expect("typed LOOKUP match must still have ObjectType"),
+                obj_type,
+                signature,
             ),
         ));
     }
@@ -1100,6 +1177,8 @@ mod tests {
         let mut entry = AclEntry {
             user: Some(user.to_string()),
             group: None,
+            uid: None,
+            gid: None,
             publish: Vec::new(),
             subscribe: Vec::new(),
             listen: Vec::new(),

@@ -16,6 +16,12 @@
  *   UBUS_TESTKIT_NSS_FAIL_GIDS=gid[,gid...]
  *       Lookups for these identities fail. FAIL takes precedence over a
  *       matching synthetic entry in either lookup direction.
+ *   UBUS_TESTKIT_NSS_EXTRA_GIDS=gid[ gid...]
+ *       Replace SO_PEERGROUPS and Groups: in /proc/<synthetic-peer-pid>/status.
+ *       The proc fixture requires UBUS_TESTKIT_PEERCRED=uid:gid:pid. Group
+ *       queries preserve the full configured list and real buffer limits.
+ *   UBUS_TESTKIT_NSS_PROC_FAIL=1
+ *       Make the synthetic status-file read/group query fail instead.
  *
  * Entries are parsed for every call, with static storage only: this keeps
  * test configuration child-local and avoids constructors or allocation. If
@@ -28,8 +34,10 @@
 #include <grp.h>
 #include <pwd.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 
 #define NSS_NAME_MAX 64
@@ -48,6 +56,105 @@ static struct group spoof_group;
 static char spoof_passwd_name[NSS_NAME_MAX + 1];
 static char spoof_group_name[NSS_NAME_MAX + 1];
 static char *nullvec[1] = {NULL};
+
+int getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen) {
+    static int (*real)(int, int, int, void *, socklen_t *);
+    if (!real)
+        real = dlsym(RTLD_NEXT, "getsockopt");
+    if (!real) {
+        errno = ENOSYS;
+        return -1;
+    }
+#ifdef SO_PEERGROUPS
+    const char *extra = getenv("UBUS_TESTKIT_NSS_EXTRA_GIDS");
+    if (level == SOL_SOCKET && optname == SO_PEERGROUPS && extra) {
+        int saved_errno = errno;
+        // Validate the descriptor through the next interposer/libc instead
+        // of fabricating success for a closed fd or a regular file.
+        int socket_type;
+        socklen_t type_len = sizeof(socket_type);
+        if (real(sockfd, SOL_SOCKET, SO_TYPE, &socket_type, &type_len))
+            return -1;
+        if (!optlen) {
+            errno = EFAULT;
+            return -1;
+        }
+        const char *fail = getenv("UBUS_TESTKIT_NSS_PROC_FAIL");
+        if (fail && strcmp(fail, "1") == 0) {
+            errno = ENODATA;
+            return -1;
+        }
+        // Match the proc fixture's strtoul prefix parsing, including stopping
+        // at the first non-numeric token. Do not inherit its daemon-side
+        // 64-group cap: newer upstream must observe ERANGE for longer lists.
+        const char *cursor = extra;
+        size_t count = 0;
+        while (*cursor) {
+            char *end;
+            strtoul(cursor, &end, 10);
+            if (end == cursor)
+                break;
+            count++;
+            cursor = end;
+        }
+        socklen_t required = (socklen_t)(count * sizeof(gid_t));
+        socklen_t available = *optlen;
+        if (available < required) {
+            *optlen = required;
+            errno = ERANGE;
+            return -1;
+        }
+        if (required && !optval) {
+            errno = EFAULT;
+            return -1;
+        }
+        cursor = extra;
+        for (size_t i = 0; i < count; i++) {
+            char *end;
+            gid_t gid = (gid_t)strtoul(cursor, &end, 10);
+            memcpy((char *)optval + i * sizeof(gid), &gid, sizeof(gid));
+            cursor = end;
+        }
+        *optlen = required;
+        errno = saved_errno;
+        return 0;
+    }
+#endif
+    return real(sockfd, level, optname, optval, optlen);
+}
+
+/* Keep supplementary-group fixtures private to each broker child. No real
+ * /proc file, host account, or process-global parent environment is changed. */
+FILE *fopen(const char *path, const char *mode) {
+    static FILE *(*real)(const char *, const char *);
+    const char *extra = getenv("UBUS_TESTKIT_NSS_EXTRA_GIDS");
+    const char *fail = getenv("UBUS_TESTKIT_NSS_PROC_FAIL");
+    const char *peer = getenv("UBUS_TESTKIT_PEERCRED");
+    long pid;
+    char expected[64];
+    if ((extra || fail) && peer && sscanf(peer, "%*u:%*u:%ld", &pid) == 1) {
+        snprintf(expected, sizeof(expected), "/proc/%ld/status", pid);
+        if (path && strcmp(path, expected) == 0 && strcmp(mode, "r") == 0) {
+            if (fail && strcmp(fail, "1") == 0) {
+                errno = ENOENT;
+                return NULL;
+            }
+            FILE *stream = tmpfile();
+            if (!stream)
+                return NULL;
+            fprintf(stream, "Name:\tubus-test-peer\nGroups:\t%s\n", extra ? extra : "");
+            rewind(stream);
+            return stream;
+        }
+    }
+    if (!real)
+        real = dlsym(RTLD_NEXT, "fopen");
+    if (!real) {
+        errno = ENOSYS;
+        return NULL;
+    }
+    return real(path, mode);
+}
 
 static int parse_ulong(const char *raw, unsigned long *value) {
     char *end = NULL;
@@ -372,4 +479,36 @@ int getgrgid_r(gid_t gid, struct group *grp, char *buf, size_t buflen,
     }
     errno = saved_errno;
     return real(gid, grp, buf, buflen, result);
+}
+
+int getpwnam_r(const char *wanted, struct passwd *pwd, char *buf, size_t buflen,
+              struct passwd **result) {
+    static int (*real)(const char *, struct passwd *, char *, size_t, struct passwd **);
+    unsigned long uid;
+    char name[NSS_NAME_MAX + 1];
+    if (find_mapping_by_name("UBUS_TESTKIT_NSS_USERS", wanted, &uid, name))
+        return getpwuid_r((uid_t)uid, pwd, buf, buflen, result);
+    if (!real)
+        real = dlsym(RTLD_NEXT, "getpwnam_r");
+    if (!real) {
+        *result = NULL;
+        return ENOSYS;
+    }
+    return real(wanted, pwd, buf, buflen, result);
+}
+
+int getgrnam_r(const char *wanted, struct group *grp, char *buf, size_t buflen,
+              struct group **result) {
+    static int (*real)(const char *, struct group *, char *, size_t, struct group **);
+    unsigned long gid;
+    char name[NSS_NAME_MAX + 1];
+    if (find_mapping_by_name("UBUS_TESTKIT_NSS_GROUPS", wanted, &gid, name))
+        return getgrgid_r((gid_t)gid, grp, buf, buflen, result);
+    if (!real)
+        real = dlsym(RTLD_NEXT, "getgrnam_r");
+    if (!real) {
+        *result = NULL;
+        return ENOSYS;
+    }
+    return real(wanted, grp, buf, buflen, result);
 }

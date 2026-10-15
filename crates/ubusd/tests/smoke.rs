@@ -321,18 +321,13 @@ fn fd_register_ping(peer: &FdPeer, seq: u16, path: &str) -> u32 {
     let obj = find(&data.payload, UbusAttr::ObjId)
         .and_then(|attr| attr.as_u32())
         .expect("fd ADD_OBJECT OBJID");
-    match peer.recv_full_frame_with_fd(Duration::from_millis(100)) {
-        Ok((status, fd)) => {
-            assert_eq!(status.hdr.ty, MsgType::Status);
-            assert_eq!(status.hdr.seq, seq);
-            assert_eq!(frame_status(&status), Some(0));
-            assert!(fd.is_none());
-        }
-        Err(e)
-            if e.kind() == std::io::ErrorKind::TimedOut
-                || e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => panic!("fd ADD_OBJECT STATUS: {e}"),
-    }
+    let (status, fd) = peer
+        .recv_full_frame_with_fd(RECV_TIMEOUT)
+        .expect("fd ADD_OBJECT STATUS");
+    assert_eq!(status.hdr.ty, MsgType::Status);
+    assert_eq!(status.hdr.seq, seq);
+    assert_eq!(frame_status(&status), Some(0));
+    assert!(fd.is_none());
     obj
 }
 
@@ -449,18 +444,11 @@ fn fd_relay_leaves_no_fd_behind_after_cycles() {
     shutdown(stop, broker);
 }
 
-/// Scheduling-dependent, like `slow_subscriber_evicted_kernel_backpressure_soak`:
-/// the wedged owner (tx cap) and the flooding caller (rx cap) share the same
-/// `MAX_TX_BUF_BYTES == MAX_RX_BUF_BYTES` budget, so which side the broker
-/// evicts first is a race — the caller frequently loses, and then the owner's
-/// queued fd is never reached. `#[ignore]` so the default suite stays
-/// deterministic; the fd-close-on-close invariant is RAII-guaranteed (an
-/// evicted Peer drops its `tx_fds`, closing every queued fd) and the
-/// deterministic close paths (unroutable / non-forwarding / ACL-denied) are
-/// pinned cross-broker in `tests/ubusd_fd_passing.rs`.
+/// The write governor wedges the owner at an exact byte count. A PING
+/// round-trip after each queued INVOKE keeps the caller's RX backlog bounded,
+/// so only the owner's TX cap can trigger eviction.
 #[cfg(feature = "testing")]
 #[test]
-#[ignore = "scheduling-dependent eviction race; deterministic fd-close coverage is in ubusd_fd_passing"]
 fn fd_queued_behind_governed_tx_is_closed_on_eviction() {
     // Peer 0 is the owner. Its HELLO and ADD_OBJECT reply fit in this
     // allowance; the first large INVOKE spends the remainder and wedges its
@@ -484,21 +472,47 @@ fn fd_queued_behind_governed_tx_is_closed_on_eviction() {
         Some(write_end.as_fd()),
     );
     drop(write_end);
-    // Flood the wedged owner past MAX_TX_BUF_BYTES so the broker evicts it,
-    // dropping its Peer (and the queued fd) by RAII. Send in a tight burst:
-    // once the owner is evicted the broker may also reset this caller (its
-    // undelivered-INVOKE rx backlog crosses the rx cap), so a send error is
-    // a valid terminal state — the pipe-EOF check below is the real
-    // assertion. `2 * MAX_TX_BUF_BYTES / large` frames comfortably clears
-    // the tx cap.
+    // Pace the flood with same-connection protocol barriers. Without these,
+    // both the caller RX and owner TX queues can hit their identical caps,
+    // letting caller eviction prevent the descriptor-bearing request from
+    // ever reaching the owner's queue.
     let flood = (2 * MAX_TX_BUF_BYTES / large.len()) as u16 + 8;
     for seq in 12..(12 + flood) {
-        if caller
-            .send_frame_with_fd(&Codec::write_frame(&fd_invoke(seq, obj, &large)), None)
-            .is_err()
-        {
-            break;
+        fd_send(&caller, &fd_invoke(seq, obj, &large), None);
+        let ping_seq = seq + 1000;
+        fd_send(
+            &caller,
+            &Frame::to_broker(
+                MsgType::Ping,
+                ping_seq,
+                ubus::envelope::EnvBuilder::new().finish(),
+            ),
+            None,
+        );
+        loop {
+            let (reply, fd) = caller
+                .recv_full_frame_with_fd(RECV_TIMEOUT)
+                .expect("flood barrier");
+            assert!(fd.is_none());
+            if reply.hdr.seq == ping_seq {
+                assert_eq!(reply.hdr.ty, MsgType::Data);
+                break;
+            }
+            // After owner eviction, later INVOKEs correctly report NOT_FOUND.
+            assert_eq!(reply.hdr.seq, seq);
+            assert_eq!(reply.hdr.ty, MsgType::Status);
+            assert_eq!(
+                frame_status(&reply),
+                Some(ubus::wire::UBUS_STATUS_NOT_FOUND)
+            );
         }
+        let (status, fd) = caller
+            .recv_full_frame_with_fd(RECV_TIMEOUT)
+            .expect("flood barrier STATUS");
+        assert_eq!(status.hdr.seq, ping_seq);
+        assert_eq!(status.hdr.ty, MsgType::Status);
+        assert_eq!(frame_status(&status), Some(0));
+        assert!(fd.is_none());
     }
 
     assert!(
@@ -1634,6 +1648,11 @@ fn oversized_frame_closes_peer() {
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 continue;
+            }
+            // Closing with unread input may produce ECONNRESET on Linux.
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                got_eof = true;
+                break;
             }
             Err(e) => panic!("read after oversized: {e:?}"),
         }
