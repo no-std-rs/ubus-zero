@@ -1278,15 +1278,24 @@ fn supplementary_gids(pid: libc::pid_t) -> Vec<u32> {
     if file.is_null() {
         return Vec::new();
     }
-    let mut line = [0 as libc::c_char; 512];
+    // A fixed fgets buffer can split a decimal token and grant a different
+    // numeric GID. Read the complete record before applying the group cap.
+    let mut line = std::ptr::null_mut();
+    let mut capacity = 0;
     let mut groups = Vec::new();
-    while !unsafe { libc::fgets(line.as_mut_ptr(), line.len() as libc::c_int, file) }.is_null() {
-        let bytes = unsafe { std::ffi::CStr::from_ptr(line.as_ptr()) }.to_bytes();
+    loop {
+        // SAFETY: getline owns/reallocates this initially null allocation and
+        // NUL-terminates every successful record. The stream remains open.
+        let read = unsafe { libc::getline(&mut line, &mut capacity, file) };
+        if read < 0 {
+            break;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(line.cast::<u8>(), read as usize) };
         let Some(rest) = bytes.strip_prefix(b"Groups:") else {
             continue;
         };
         // strtoul mirrors upstream's whitespace, overflow and stopping rules.
-        let mut p = unsafe { line.as_ptr().add(bytes.len() - rest.len()) };
+        let mut p = unsafe { line.add(bytes.len() - rest.len()) };
         while unsafe { *p } != 0 && groups.len() < 64 {
             let mut end = std::ptr::null_mut();
             let gid = unsafe { libc::strtoul(p, &mut end, 10) };
@@ -1298,7 +1307,10 @@ fn supplementary_gids(pid: libc::pid_t) -> Vec<u32> {
         }
         break;
     }
-    unsafe { libc::fclose(file) };
+    unsafe {
+        libc::free(line.cast());
+        libc::fclose(file);
+    }
     groups
 }
 

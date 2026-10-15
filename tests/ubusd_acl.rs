@@ -1550,3 +1550,40 @@ fn recv_until(
     }
     Err("recv_until: timeout".to_owned())
 }
+
+// The pinned C broker reads only the first 511 bytes of Groups:. Besides
+// losing later groups, this can turn a partial numeric token into a different
+// valid GID. Parse the complete record in Rust while retaining the 64-group
+// cap; keep this security regression outside the pinned parity contract.
+#[rstest]
+#[case::group_crossing_old_buffer_boundary(1_234_567_890_u32, UBUS_STATUS_OK)]
+#[case::group_after_old_buffer_boundary(2_000_000_000_u32, UBUS_STATUS_OK)]
+#[case::truncated_numeric_prefix_is_not_a_group(12_345_678_u32, UBUS_STATUS_INVALID_ARGUMENT)]
+fn long_supplementary_group_record_keeps_exact_group_ids(
+    #[case] grant_gid: u32,
+    #[case] expected: i32,
+) {
+    let acl = AclDir::with_grant(r#"{"group":"secondary","publish":["long-groups.*"]}"#);
+    let prefix = (1_000_000_000_u32..1_000_000_045)
+        .map(|gid| format!("{gid} "))
+        .collect::<String>();
+    let extra_gids = format!("{prefix}1234567890 2000000000");
+    // A real proc Groups record uses this prefix and sorted decimal IDs.
+    // All 47 memberships fit below the retained 64-group compatibility cap.
+    let record = format!("Groups:\t{extra_gids}\n");
+    assert_eq!(record[..511].split_whitespace().last(), Some("12345678"));
+    let mut options = nonroot_opts(Some(&acl));
+    options.env.extend([
+        (
+            "UBUS_TESTKIT_NSS_GROUPS".to_owned(),
+            format!("1000:testgroup,{grant_gid}:secondary,0:root"),
+        ),
+        ("UBUS_TESTKIT_NSS_EXTRA_GIDS".to_owned(), extra_gids),
+    ]);
+    run_matrix_case_with(
+        "ubusd_acl long_supplementary_group_record_keeps_exact_group_ids",
+        MatrixArm::Rs,
+        &options,
+        &|path| named_add_body(path, "long-groups.object", expected),
+    );
+}

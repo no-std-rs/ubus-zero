@@ -20,6 +20,11 @@ Unresolvable ACL identity names fail closed, following upstream's later
 GID zero. The pinned C reference predates that fix; dedicated Rust regressions
 cover this invalid-configuration case without normalizing pinned transcripts.
 
+Supplementary-group parsing also reads complete proc records before applying
+the 64-group limit. The pinned reference's 511-byte chunk can truncate a
+numeric GID into another valid ID; dedicated Rust regressions prevent that
+false grant and retain legitimate groups beyond the old buffer boundary.
+
 ## Test layers
 
 | Layer | Purpose | Runs without Docker artifacts |

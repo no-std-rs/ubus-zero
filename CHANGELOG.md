@@ -25,6 +25,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   unresolved identity names remain denied.
 - Replace duplicate ACL JSON keys using the final value in the original key
   position, including permission revocation and privilege tables.
+- Read complete supplementary-group records so long lines cannot truncate GIDs
+  into incorrect ACL grants or drop valid groups below the 64-group limit.
 - Register malformed object signatures as untyped objects like upstream.
 - Reject unexpected replies or trailing bytes during golden transcript replay.
 
