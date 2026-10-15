@@ -7,6 +7,7 @@ members = [
     "crates/ubus-client",
 ]
 resolver = "2"
+exclude = ["examples/esp32c3-router-display"]
 
 [package]
 name = "ubus-zero"
@@ -43,11 +44,13 @@ default = []
 testing = []
 json = ["dep:serde_json"]
 unix = ["dep:rustix"]
+portable-atomic = ["spin/portable-atomic", "dep:portable-atomic-util"]
 
 [dependencies]
 thiserror = { version = "2", default-features = false }
 spin      = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
+portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "event", "time"], optional = true }

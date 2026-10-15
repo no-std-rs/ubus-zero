@@ -148,6 +148,22 @@ do not retain unrelated frames, so use the request-based methods when mixing
 calls with events or subscriptions. See [Cellctl imports](docs/cellctl-imports.md)
 for the source and adaptations of these APIs.
 
+### ESP32 router display
+
+The [ESP32-C3 router display example](examples/esp32c3-router-display/README.md)
+turns the GUITION ESP32-2424S012 round-screen gadget into a live OpenWrt
+dashboard: WAN traffic and history, memory/load/uptime, Wi-Fi clients, link
+counters, and router identity. It includes `no_std` firmware, the original
+animation gadget's pin configuration, a read-only rpcd account/ACL, router
+setup, and build/flash instructions. It connects over Wi-Fi through uhttpd's
+`/ubus` JSON-RPC bridge using this crate's blobmsg/JSON codecs.
+
+Targets without pointer-width atomics, including ESP32-C3, can enable
+`portable-atomic` for the shared-buffer transport helpers and spin mutex.
+The application must configure `portable-atomic`'s appropriate fallback; this
+single-core example enables `unsafe-assume-single-core`. The protocol library
+continues to require only `core` and `alloc`.
+
 ### Provide an object
 
 ```rust
