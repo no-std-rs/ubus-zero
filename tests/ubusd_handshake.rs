@@ -6239,30 +6239,31 @@ fn disconnect_cascades_into_lookup_and_subscribers_body(path: &str) {
         assert_eq!(s, 0, "subscribe failed: status={s}");
     }
 
-    // Drop A. The broker reaps lazily on the next poll_once after
-    // POLLHUP, so a follow-up LOOKUP must use a recv_until deadline.
+    // The broker's unsubscribe proves it has reaped A and removed the
+    // subscription. Use that protocol barrier before LOOKUP so scheduling
+    // cannot change the number of requests captured by the parity tap.
     owner.shutdown();
+    let unsub = recv_until(sub_conn.transport_mut(), Duration::from_secs(5), |frame| {
+        frame.hdr.ty == MsgType::Unsubscribe
+    })
+    .expect("broker-minted Unsubscribe after owner disconnect");
+    assert_eq!(
+        find(&unsub.payload, UbusAttr::ObjId).and_then(|attr| attr.as_u32()),
+        Some(sub_obj_id)
+    );
+    assert_eq!(
+        find(&unsub.payload, UbusAttr::Target).and_then(|attr| attr.as_u32()),
+        Some(obj_id_a)
+    );
 
     let lookup_transport = UnixUbusTransport::connect(&path).expect("b connect");
     let mut lookup_client = UbusClient::connect(lookup_transport).expect("b hello");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut got_enoent = false;
-    while Instant::now() < deadline {
-        match lookup_client.lookup("example") {
-            Err(UbusError::Status(s)) if s == UBUS_STATUS_NOT_FOUND => {
-                got_enoent = true;
-                break;
-            }
-            Err(UbusError::Status(s)) => {
-                panic!("LOOKUP after owner disconnect must report UBUS_STATUS_NOT_FOUND, got {s}");
-            }
-            Err(_) => break,
-            Ok(_) => std::thread::sleep(Duration::from_millis(20)),
-        }
-    }
     assert!(
-        got_enoent,
-        "LOOKUP must report example gone after owner disconnect"
+        matches!(
+            lookup_client.lookup("example"),
+            Err(UbusError::Status(UBUS_STATUS_NOT_FOUND))
+        ),
+        "LOOKUP must report example gone after owner disconnect's Unsubscribe"
     );
 
     // C drains for 200 ms. Nothing can NOTIFY (A is gone), but a
