@@ -112,19 +112,35 @@ class ReleaseIdentityTest(unittest.TestCase):
             command('cargo', 'package', '-p', 'ubus-zero', '--list')
         command('cargo', 'package', '-p', 'ubus-zero', '--list', '--allow-dirty')
         output = self.root / 'dist/registry'
-        # The capture index mirrors crates.io, where a published 0.2.0 would make Cargo refuse
-        # these fixture uploads as duplicates. Keep the upstream mirror empty so the regression
-        # stays hermetic, and prove it only ever looked up the fixture's own packages.
+        # After a release, crates.io already lists 0.2.0 for every public package. Simulate
+        # that upstream: capture must still succeed, and the captured packages must never be
+        # resolved from the mirror, which would make Cargo refuse them as duplicates.
         upstream = []
 
-        def unpublished(url, timeout):
-            upstream.append(url)
-            raise uploads.urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+        class Published:
+            def __init__(self, body):
+                self.body = body
 
-        with patch.object(uploads, 'ROOT', self.root), patch.object(sys, 'argv', ['package-registry-uploads.py', str(output)]), patch.dict(os.environ, {'CARGO_HOME': str(self.root / '.cargo-home')}), patch.object(uploads.urllib.request, 'urlopen', unpublished):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size=-1):
+                return self.body
+
+        def released(url, timeout):
+            upstream.append(url)
+            name = url.rsplit('/', 1)[-1]
+            if name not in prepare.PACKAGES:
+                raise uploads.urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+            entry = {'name': name, 'vers': '0.2.0', 'deps': [], 'cksum': '0' * 64, 'features': {}, 'yanked': False}
+            return Published(json.dumps(entry).encode() + b'\n')
+
+        with patch.object(uploads, 'ROOT', self.root), patch.object(sys, 'argv', ['package-registry-uploads.py', str(output)]), patch.dict(os.environ, {'CARGO_HOME': str(self.root / '.cargo-home')}), patch.object(uploads.urllib.request, 'urlopen', released):
             uploads.main()
-        self.assertTrue(upstream)
-        self.assertLessEqual(set(upstream), {'https://index.crates.io/' + uploads.index_path(name) for name in prepare.PACKAGES})
+        self.assertEqual(upstream, [], 'Captured packages must not be resolved from the crates.io mirror')
         checksums = output.joinpath('SHA256SUMS').read_text()
         for name in prepare.PACKAGES:
             asset = output / f'{name}-0.2.0.cargo-upload'

@@ -2,8 +2,10 @@
 """Capture Cargo publish requests locally for Runnerless to relay to crates.io.
 
 The local registry never forwards a publish request. Its sparse index mirrors
-crates.io and adds packages captured earlier in this run, so packages can be
-prepared using the same dependency index Cargo uses for crates.io.
+crates.io for dependencies, so packages are prepared against the same index
+Cargo uses for crates.io. The captured packages themselves list only uploads
+from this run: once a release reaches crates.io, its mirrored entry would make
+Cargo refuse to capture that version again for every later check.
 """
 
 import hashlib
@@ -121,6 +123,9 @@ class RegistryHandler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/index/"):
             item = self.path.removeprefix("/index/")
             data = self.server.index.get(item)
+            if data is None and item in {index_path(name) for name in PACKAGES}:
+                self.send_error(404)
+                return
             if data is None:
                 try:
                     with urllib.request.urlopen(
