@@ -47,6 +47,17 @@ test("a same-size firmware change fails SHA-256 verification", async ({ page }) 
   await expect(page.getByRole("button", { name: "Prepare installation" })).toBeDisabled();
 });
 
+test("downloads the verified bytes even after the published binary changes", async ({ page }) => {
+  const binary = await readFile(new URL("../../dist/flasher/router-display.bin", import.meta.url));
+  await page.goto("/");
+  const link = page.getByRole("link", { name: "Download binary" });
+  await expect(link).toBeVisible();
+  await page.route("**/router-display.bin", route => route.fulfill({ body: Buffer.alloc(binary.length), contentType: "application/octet-stream" }));
+  const [download] = await Promise.all([page.waitForEvent("download"), link.click()]);
+  expect(download.suggestedFilename()).toBe("router-display.bin");
+  expect(await readFile(await download.path())).toEqual(binary);
+});
+
 test("mobile layout remains usable and unsupported browsers can download", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => { Object.defineProperty(navigator, "serial", { value: undefined }); });

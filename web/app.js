@@ -49,6 +49,8 @@ window.addEventListener("pagehide", () => {
   if (firmwareUrl) URL.revokeObjectURL(firmwareUrl);
   firmwareUrl = undefined;
   release = undefined;
+  $("download").hidden = true;
+  $("download").removeAttribute("href");
   $("prepare").disabled = true;
   form.reset();
 });
@@ -72,6 +74,7 @@ async function loadRelease() {
   $("revision").textContent = `main · ${release.revision.slice(0, 12)}`;
   $("revision").href = `https://github.com/no-std-rs/ubus-zero/commit/${release.revision}`;
   $("digest").textContent = release.sha256;
+  $("download").href = firmwareUrl;
   $("download").hidden = false;
   $("prepare").disabled = false;
   if (!navigator.serial || !window.isSecureContext) {
