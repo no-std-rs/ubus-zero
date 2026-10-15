@@ -1298,6 +1298,36 @@ fn acl_identity_resolution_preserves_root_group_boundary(
 
 fn signature_shape(shape: &str) -> (Vec<u8>, Vec<u8>) {
     let valid = signature_with_ping_method();
+    if let Some(integer) = shape.strip_prefix("integer-") {
+        let (kind, width, variant) =
+            match integer.split_once('-').expect("integer width and length") {
+                ("int64", variant) => (4_u8, 8, variant),
+                ("int32", variant) => (5, 4, variant),
+                ("int16", variant) => (6, 2, variant),
+                ("int8", variant) => (7, 1, variant),
+                _ => unreachable!(),
+            };
+        let size = match variant {
+            "short" => width - 1,
+            "exact" => width,
+            "oversized" => width + 1,
+            _ => unreachable!(),
+        };
+        // Retain the valid "ping" name/header and replace only its scalar
+        // type and payload length. The outer alignment bytes remain padding.
+        let mut scalar = valid;
+        scalar[0] = 0x80 | kind;
+        scalar.resize(scalar.len() + size, 0x5a);
+        let raw_len = scalar.len() as u32;
+        scalar[1..4].copy_from_slice(&raw_len.to_be_bytes()[1..4]);
+        scalar.resize(ubus::blob::align4(raw_len as usize), 0);
+        let expected = if variant == "exact" {
+            scalar.clone()
+        } else {
+            Vec::new()
+        };
+        return (scalar, expected);
+    }
     let mut malformed = valid.clone();
     match shape {
         "valid" => return (valid.clone(), valid),
@@ -1405,6 +1435,67 @@ macro_rules! signature_registration_case {
         });
     };
 }
+
+signature_registration_case!(
+    signature_int64_short_discards_type,
+    "integer-int64-short",
+    false
+);
+signature_registration_case!(
+    signature_int64_exact_retains_type,
+    "integer-int64-exact",
+    true
+);
+signature_registration_case!(
+    signature_int64_oversized_discards_type,
+    "integer-int64-oversized",
+    false
+);
+signature_registration_case!(
+    signature_int32_short_discards_type,
+    "integer-int32-short",
+    false
+);
+signature_registration_case!(
+    signature_int32_exact_retains_type,
+    "integer-int32-exact",
+    true
+);
+signature_registration_case!(
+    signature_int32_oversized_discards_type,
+    "integer-int32-oversized",
+    false
+);
+signature_registration_case!(
+    signature_int16_short_discards_type,
+    "integer-int16-short",
+    false
+);
+signature_registration_case!(
+    signature_int16_exact_retains_type,
+    "integer-int16-exact",
+    true
+);
+signature_registration_case!(
+    signature_int16_oversized_discards_type,
+    "integer-int16-oversized",
+    false
+);
+signature_registration_case!(
+    signature_int8_short_discards_type,
+    "integer-int8-short",
+    false
+);
+signature_registration_case!(
+    signature_int8_exact_retains_type,
+    "integer-int8-exact",
+    true
+);
+signature_registration_case!(
+    signature_int8_oversized_discards_type,
+    "integer-int8-oversized",
+    false
+);
 
 signature_registration_case!(signature_valid_method_retains_type, "valid", true);
 signature_registration_case!(signature_empty_method_list_retains_type, "empty", true);
@@ -1587,3 +1678,96 @@ fn long_supplementary_group_record_keeps_exact_group_ids(
         &|path| named_add_body(path, "long-groups.object", expected),
     );
 }
+
+acl_case!(
+    lookup_unions_matching_grants_and_preserves_method_bytes,
+    arm,
+    {
+        let acl = AclDir::with_files(&[
+            (
+                "publish.json",
+                r#"{"user":"testuser","publish":["union.*"]}"#,
+            ),
+            (
+                "user.json",
+                r#"{"user":"alias","access":{"union.*":{"methods":["alpha"]}}}"#,
+            ),
+            (
+                "primary-group.json",
+                r#"{"group":"testgroup","access":{"union.object":{"methods":["beta"]}}}"#,
+            ),
+            (
+                "supplementary-group.json",
+                r#"{"group":"secondary","access":{"union.*":{"methods":["gamma"]}}}"#,
+            ),
+            (
+                "other-user.json",
+                r#"{"user":"other","access":{"union.*":{"methods":["denied"]}}}"#,
+            ),
+            (
+                "other-path.json",
+                r#"{"user":"testuser","access":{"other.*":{"methods":["denied"]}}}"#,
+            ),
+        ]);
+        let mut options = nonroot_opts(Some(&acl));
+        options.env.extend([
+            (
+                "UBUS_TESTKIT_NSS_USERS".to_owned(),
+                "1000:testuser,1000:alias,2000:other,0:root".to_owned(),
+            ),
+            (
+                "UBUS_TESTKIT_NSS_GROUPS".to_owned(),
+                "1000:testgroup,2000:secondary,0:root".to_owned(),
+            ),
+            ("UBUS_TESTKIT_NSS_EXTRA_GIDS".to_owned(), "2000".to_owned()),
+        ]);
+        run_matrix_case_with(
+            "ubusd_acl lookup_unions_matching_grants_and_preserves_method_bytes",
+            arm,
+            &options,
+            &|path| {
+                let mut signature = Vec::new();
+                let mut expected = Vec::new();
+                for (index, method) in ["gamma", "denied", "alpha", "beta"].iter().enumerate() {
+                    let mut builder = BlobBuilder::new();
+                    builder.open_table(Some(method));
+                    builder.put_i32(Some("argument"), index as i32);
+                    builder.close_table();
+                    let bytes = builder.finish();
+                    signature.extend_from_slice(&bytes);
+                    if *method != "denied" {
+                        expected.extend_from_slice(&bytes);
+                    }
+                }
+                let mut owner = connect_and_wait_hello(path);
+                let (object, _) = common::raw_add_object_with_signature(
+                    &mut owner,
+                    1,
+                    "union.object",
+                    &signature,
+                );
+                let mut caller = connect_and_wait_hello(path);
+                let mut request = EnvBuilder::new();
+                request.push_str(UbusAttr::ObjPath, "union.object");
+                caller
+                    .send(&Frame::to_broker(MsgType::Lookup, 2, request.finish()))
+                    .expect("union LOOKUP");
+                let data = recv_until(&mut caller, Duration::from_secs(5), |frame| {
+                    frame.hdr.seq == 2 && frame.hdr.ty == MsgType::Data
+                })
+                .expect("union LOOKUP DATA");
+                assert_eq!(
+                    find(&data.payload, UbusAttr::ObjId).and_then(|attr| attr.as_u32()),
+                    Some(object)
+                );
+                assert_eq!(
+                    find(&data.payload, UbusAttr::Signature)
+                        .expect("visible signature")
+                        .payload,
+                    expected
+                );
+                expect_status_only(&mut caller, 2, UBUS_STATUS_OK, "union LOOKUP");
+            },
+        );
+    }
+);

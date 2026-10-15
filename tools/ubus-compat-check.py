@@ -8,12 +8,14 @@ UBUS_ZERO_TEST_TIMEOUT (seconds per executable) to tune the resource budget.
 """
 
 import concurrent.futures
+from contextlib import contextmanager, nullcontext
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -114,25 +116,55 @@ def broker_executable(output):
     return None
 
 
+@contextmanager
+def managed_process(command, env, stdout=None, stderr=None):
+    """Give test executables and every Cargo phase the same cleanup scope."""
+    process = subprocess.Popen(
+        command, cwd=ROOT, env=env, stdout=stdout, stderr=stderr,
+        text=True, start_new_session=True,
+    )
+    try:
+        with RUNNING_LOCK:
+            RUNNING.add(process)
+        if STOP.is_set():
+            kill_session(process)
+        yield process
+    finally:
+        try:
+            # A failed test/Cargo process can leave children whose output is
+            # detached. Stop its entire private session even after it exits.
+            kill_session(process)
+            process.wait()
+        finally:
+            with RUNNING_LOCK:
+                RUNNING.discard(process)
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+
+
+def run_cargo(command, env, capture_stdout=False):
+    # Capture build JSON without a pipe: an orphaned compiler holding stdout
+    # must not prevent observing Cargo's exit and cleaning up its session.
+    capture = tempfile.TemporaryFile(mode="w+", encoding="utf-8") if capture_stdout else nullcontext(None)
+    with capture as output:
+        with managed_process(command, env, stdout=output) as process:
+            status = process.wait()
+        if output:
+            output.seek(0)
+        return subprocess.CompletedProcess(command, status, output.read() if output else None)
+
+
 def run_test(executable, label, env, threads, timeout):
     started = time.monotonic()
     try:
         if STOP.is_set():
             return label, 130, "Cancelled\n", 0
-        process = subprocess.Popen(
-            [executable, "--quiet", "--test-threads", str(threads)],
-            cwd=ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-        with RUNNING_LOCK:
-            RUNNING.add(process)
-        try:
-            if STOP.is_set():
-                kill_session(process)
+        with managed_process(
+            [executable, "--quiet", "--test-threads", str(threads)], env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        ) as process:
             try:
                 output, _ = process.communicate(timeout=timeout)
                 status = process.returncode
@@ -148,16 +180,6 @@ def run_test(executable, label, env, threads, timeout):
                 process.communicate()
                 raise
             return label, status, output, time.monotonic() - started
-        finally:
-            # A panicking suite can drop a plain std::process::Child without
-            # stopping it. Descendants with detached output do not keep
-            # communicate() open, so stop the suite's whole private session
-            # even when the executable itself has already returned.
-            kill_session(process)
-            with RUNNING_LOCK:
-                RUNNING.discard(process)
-            if process.stdout:
-                process.stdout.close()
     except OSError as error:
         return label, 127, f"Could not execute test binary: {error}\n", time.monotonic() - started
 
@@ -185,13 +207,19 @@ def main():
     if sys.platform != "linux":
         # Cross builds must execute through the configured target runner.
         env["RUST_TEST_THREADS"] = str(threads)
-        return subprocess.call([*cargo, "--no-fail-fast"], cwd=ROOT, env=env)
+        try:
+            return run_cargo([*cargo, "--no-fail-fast"], env=env).returncode
+        except KeyboardInterrupt:
+            return 130
 
     started = time.monotonic()
-    build = subprocess.run(
-        [*cargo, "--no-run", "--message-format=json-render-diagnostics"],
-        cwd=ROOT, env=env, stdout=subprocess.PIPE, text=True, check=False,
-    )
+    try:
+        build = run_cargo(
+            [*cargo, "--no-run", "--message-format=json-render-diagnostics"],
+            env=env, capture_stdout=True,
+        )
+    except KeyboardInterrupt:
+        return 130
     if build.returncode:
         return build.returncode
     executables = test_executables(build.stdout)
@@ -228,7 +256,10 @@ def main():
                     kill_session(process)
             return 130
 
-    docs = subprocess.run([*cargo, "--doc", "--no-fail-fast"], cwd=ROOT, env=env, check=False)
+    try:
+        docs = run_cargo([*cargo, "--doc", "--no-fail-fast"], env=env)
+    except KeyboardInterrupt:
+        return 130
     if docs.returncode:
         failures.append("doctests")
     print(f"Strict compatibility finished in {time.monotonic() - started:.2f}s; "

@@ -363,6 +363,8 @@ fn object_signature(bytes: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         let data = &attr.payload[data_start..];
+        // Pinned libubox blob_check_type requires exact integer widths.
+        // Its double case instead accepts any payload of at least 8 bytes.
         let valid = match attr.id {
             3 => !data.is_empty() && data.last() == Some(&0),
             4 => data.len() == 8,
@@ -435,6 +437,7 @@ fn dispatch_lookup(
         let signature = if cred.uid == Some(0) {
             signature
         } else {
+            let grants = acl.matching_access_grants(cred, &path);
             let mut remaining = signature;
             let mut allowed = Vec::new();
             let mut declared = 0;
@@ -445,7 +448,7 @@ fn dispatch_lookup(
                     .next()
                     .and_then(|attr| attr.name)
                 {
-                    if acl.check(cred, &path, AclOp::Access, Some(method)) {
+                    if grants.iter().any(|grant| grant.allows_method(method)) {
                         allowed.extend_from_slice(raw);
                     }
                 }

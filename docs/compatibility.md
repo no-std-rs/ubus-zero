@@ -76,9 +76,10 @@ UBUS_ZERO_TEST_JOBS=4 RUST_TEST_THREADS=32 python3 tools/ubus-compat-check.py
 300). Native Linux executes the binaries directly; other hosts retain the
 configured `tools/cargo.sh` target runner.
 
-Each native suite runs in a private Linux session. On completion, timeout, or
-cancellation, the runner stops its live process groups, including shell
-handlers that create their own group and children whose parents have exited.
+Each native suite and Cargo phase runs in a private Linux session. On
+completion, timeout, or cancellation, the runner stops its live process groups,
+including shell handlers that create their own group and children whose parents
+have exited.
 Session-isolation regressions verify this cleanup leaves neighboring suites
 running.
 

@@ -27,6 +27,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   position, including permission revocation and privilege tables.
 - Read complete supplementary-group records so long lines cannot truncate GIDs
   into incorrect ACL grants or drop valid groups below the 64-group limit.
+- Match ACL grants once per object when filtering non-root lookup replies,
+  avoiding repeated registry scans for every declared method.
 - Register malformed object signatures as untyped objects like upstream.
 - Reject unexpected replies or trailing bytes during golden transcript replay.
 

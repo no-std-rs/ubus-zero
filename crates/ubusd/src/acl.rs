@@ -178,6 +178,18 @@ impl AclRegistry {
         })
     }
 
+    /// Select the peer's grants for one object before filtering its declared
+    /// methods. Reusing these matches avoids scanning the full ACL for every
+    /// method while preserving the union of exact and prefix grants.
+    pub(crate) fn matching_access_grants(&self, cred: &Cred, path: &str) -> Vec<&AccessGrant> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.matches_peer(cred))
+            .flat_map(|entry| &entry.access)
+            .filter(|grant| grant.object.matches(path))
+            .collect()
+    }
+
     /// Load root-owned regular `*.json` files without group/other write or
     /// other execute permission, matching upstream's file safety checks.
     /// Individual files are intentionally best-effort: invalid ACL material
