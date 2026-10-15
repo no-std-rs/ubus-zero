@@ -23,6 +23,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Match pinned OpenWrt ACL file safety, identity resolution, supplementary
   groups, mixed-type entries, and method visibility during lookup, while
   unresolved identity names remain denied.
+- Replace duplicate ACL JSON keys using the final value in the original key
+  position, including permission revocation and privilege tables.
 - Register malformed object signatures as untyped objects like upstream.
 - Reject unexpected replies or trailing bytes during golden transcript replay.
 

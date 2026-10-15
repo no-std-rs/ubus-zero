@@ -115,6 +115,7 @@ impl RpcdHarness {
             .stderr(Stdio::piped())
             .env("UBUS_TESTKIT_PATH_MAP", path_map)
             .env("UBUS_TESTKIT_RPCD_EXEC_WAIT_EOF", "1")
+            .env("UBUS_TESTKIT_RPCD_SYNC_ROOT", fs::canonicalize(&dir)?)
             .env("LD_PRELOAD", preload)
             .spawn()?;
         let mut stderr = child.stderr.take();

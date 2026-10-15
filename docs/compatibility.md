@@ -140,6 +140,14 @@ temporary-file creation, chmod/rename/unlink, and plugin loading, so UCI commits
 and rpcd sessions can run concurrently without sharing host configuration.
 The redirector itself has an executable regression probe for those operations.
 
+Two child-local rpcd adjustments isolate upstream scheduling from host load.
+After a successful real `fsync` of a file under the private fixture root, the
+redirector omits the next machine-wide `sync`; file contents, permissions,
+`fsync` failures, and writes outside that root remain observable. The exec
+shim defers pipe EOF until rpcd's normal child callback records the actual
+exit status. Native probes verify these boundaries without synthesizing
+replies or exit codes.
+
 FD tests use direct sockets because SCM_RIGHTS cannot pass through the wire
 tap. They cover fragmented headers and bodies, descriptor placement at framing
 boundaries, pipelined calls, coalesced replies, error-path disposal, disconnects,

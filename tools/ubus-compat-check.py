@@ -104,6 +104,11 @@ def run_test(executable, label, env, threads, timeout):
                 raise
             return label, status, output, time.monotonic() - started
         finally:
+            # A panicking suite can drop a plain std::process::Child without
+            # stopping it. Descendants with detached output do not keep
+            # communicate() open, so reap the suite's whole private group
+            # even when the executable itself has already returned.
+            kill_group(process)
             with RUNNING_LOCK:
                 RUNNING.discard(process)
             if process.stdout:

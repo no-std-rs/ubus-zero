@@ -37,7 +37,8 @@ class CompatRunnerTest(unittest.TestCase):
                          ["/tmp/first", "/tmp/second"])
 
     def test_binary_failure_is_retained_with_diagnostics(self):
-        with patch.object(runner.subprocess, "Popen") as run:
+        with patch.object(runner.subprocess, "Popen") as run, \
+             patch.object(runner, "kill_group"):
             run.return_value.communicate.return_value = ("named regression failed\n", None)
             run.return_value.returncode = 101
             label, code, output, _ = runner.run_test("/tmp/test", "fd", {}, 8, 60)
@@ -51,7 +52,7 @@ class CompatRunnerTest(unittest.TestCase):
                 subprocess.TimeoutExpired([], 60), ("last active case\n", None),
             ]
             _, code, output, _ = runner.run_test("/tmp/test", "fd", {}, 8, 60)
-        kill.assert_called_once_with(spawn.return_value)
+        kill.assert_called_with(spawn.return_value)
         self.assertEqual(code, 124)
         self.assertIn("last active case", output)
         self.assertIn("Timed out", output)
@@ -76,6 +77,40 @@ class CompatRunnerTest(unittest.TestCase):
             if state not in (None, "Z"):
                 os.kill(child, signal.SIGKILL)
             self.assertIn(state, (None, "Z"), "grandchild survived suite timeout")
+
+    @unittest.skipUnless(sys.platform == "linux", "native Linux process cleanup")
+    def test_completed_suites_stop_children_with_detached_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "test"
+            for status in (0, 7):
+                with self.subTest(status=status):
+                    probe.write_text(f"#!{sys.executable}\nimport subprocess,sys\n"
+                        "child=subprocess.Popen(['sleep','60'],"
+                        "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                        f"print(child.pid,flush=True)\nsys.exit({status})\n")
+                    probe.chmod(0o700)
+                    _, code, output, _ = runner.run_test(
+                        str(probe), "finished", os.environ.copy(), 1, 5)
+                    self.assertEqual(code, status)
+                    child = int(output.splitlines()[0])
+                    try:
+                        # Group termination is asynchronous. Wait for the
+                        # kernel task state, without accepting a live child.
+                        deadline = time.monotonic() + 2
+                        while True:
+                            try:
+                                state = Path(f"/proc/{child}/stat").read_text().split()[2]
+                            except (FileNotFoundError, ProcessLookupError):
+                                state = None
+                            if state in (None, "Z") or time.monotonic() >= deadline:
+                                break
+                            time.sleep(.01)
+                        self.assertIn(state, (None, "Z"), "child survived suite completion")
+                    finally:
+                        try:
+                            os.kill(child, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     @unittest.skipUnless(sys.platform == "linux", "native Linux process cleanup")
     def test_fault_profile_interrupt_stops_both_runners_and_their_children(self):

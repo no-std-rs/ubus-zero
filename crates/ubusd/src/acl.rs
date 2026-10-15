@@ -297,37 +297,53 @@ fn load_one(path: &Path) -> Result<Vec<AclEntry>, AclError> {
         .collect())
 }
 
-#[derive(Deserialize)]
+#[derive(Default)]
 struct RawAclFile {
-    #[serde(default, deserialize_with = "optional_string")]
     user: Option<String>,
-    #[serde(default, deserialize_with = "optional_string")]
     group: Option<String>,
-    #[serde(default, deserialize_with = "string_array")]
     publish: Vec<String>,
-    #[serde(default, deserialize_with = "string_array")]
     subscribe: Vec<String>,
-    #[serde(default, deserialize_with = "string_array")]
     listen: Vec<String>,
-    #[serde(default, deserialize_with = "string_array")]
     send: Vec<String>,
-    #[serde(default)]
     access: Option<OrderedJson>,
 }
 
-fn optional_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_str().map(str::to_owned))
+impl<'de> Deserialize<'de> for RawAclFile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Apply json-c duplicate replacement before typed policy extraction,
+        // including root fields. A final wrong-typed value removes an earlier
+        // typed value instead of retaining its grant or rejecting the file.
+        let OrderedJson::Object(fields) = OrderedJson::deserialize(deserializer)? else {
+            return Err(de::Error::custom("expected ACL object"));
+        };
+        let mut raw = Self::default();
+        for (name, value) in fields {
+            match (name.as_str(), value) {
+                ("user", OrderedJson::String(user)) => raw.user = Some(user),
+                ("group", OrderedJson::String(group)) => raw.group = Some(group),
+                ("publish", value) => raw.publish = string_array(value),
+                ("subscribe", value) => raw.subscribe = string_array(value),
+                ("listen", value) => raw.listen = string_array(value),
+                ("send", value) => raw.send = string_array(value),
+                ("access", value) => raw.access = Some(value),
+                _ => {}
+            }
+        }
+        Ok(raw)
+    }
 }
 
-fn string_array<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value
-        .as_array()
+fn string_array(value: OrderedJson) -> Vec<String> {
+    let OrderedJson::Array(values) = value else {
+        return Vec::new();
+    };
+    values
         .into_iter()
-        .flatten()
-        .filter_map(|value| value.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
-        .collect())
+        .filter_map(|value| match value {
+            OrderedJson::String(value) if !value.is_empty() => Some(value),
+            _ => None,
+        })
+        .collect()
 }
 
 /// JSON value retaining object key order. `serde_json::Value` is unsuitable
@@ -386,9 +402,16 @@ impl<'de> Deserialize<'de> for OrderedJson {
                 Ok(OrderedJson::Array(values))
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut values = Vec::new();
-                while let Some((key, value)) = map.next_entry()? {
-                    values.push((key, value));
+                let mut values: Vec<(String, OrderedJson)> = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, OrderedJson>()? {
+                    // json-c replaces a duplicate key's value in its original
+                    // position. Earlier access grants must not survive a
+                    // later replacement that revokes their methods.
+                    if let Some((_, previous)) = values.iter_mut().find(|(name, _)| *name == key) {
+                        *previous = value;
+                    } else {
+                        values.push((key, value));
+                    }
                 }
                 Ok(OrderedJson::Object(values))
             }
@@ -820,6 +843,47 @@ mod tests {
         assert_eq!(
             &blob[..16],
             &[0x85, 0x00, 0x00, 0x10, 0x00, 0x04, b'z', b'e', b't', b'a', 0, 0, 0, 0, 0, 1,]
+        );
+    }
+
+    #[test]
+    fn duplicate_root_wrong_types_drop_earlier_values_without_discarding_group() {
+        let entries = parse_file(
+            br#"{
+            "user":"alice","user":42,"group":"dialout",
+            "publish":["old.*"],"publish":false,
+            "subscribe":["old.*"],"subscribe":null,
+            "listen":true,"send":[],
+            "access":{"svc":{"methods":["ping"]}},"access":[]
+        }"#,
+        )
+        .expect("mixed-type ACL remains loadable");
+        let entry = &entries[0];
+        assert_eq!(entry.user, None);
+        assert_eq!(entry.group.as_deref(), Some("dialout"));
+        assert!(entry.publish.is_empty() && entry.subscribe.is_empty());
+        assert!(entry.listen.is_empty() && entry.send.is_empty() && entry.access.is_empty());
+    }
+
+    #[test]
+    fn duplicate_privilege_key_replaces_value_in_original_position() {
+        let entries = parse_file(
+            br#"{"user":"root","access":{"svc":{"acl":{"zeta":1,"alpha":2,"zeta":3}}}}"#,
+        )
+        .expect("ACL parses");
+        let blob = entries[0].access[0]
+            .priv_blob
+            .as_deref()
+            .expect("priv blob");
+        assert_eq!(
+            BlobIter::new(blob)
+                .map(|attr| attr.name)
+                .collect::<Vec<_>>(),
+            vec![Some("zeta"), Some("alpha")]
+        );
+        assert_eq!(
+            ubus::blobmsg::lookup(blob, "zeta").and_then(|attr| attr.value().ok()),
+            Some(BlobValue::Int32(3))
         );
     }
 

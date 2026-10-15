@@ -765,6 +765,49 @@ publish_rule_case!(
     UBUS_STATUS_OK
 );
 
+publish_rule_case!(
+    duplicate_root_user_uses_last_identity,
+    r#"{"user":"no-such-ubus-test-user","user":"testuser","publish":["root.*"]}"#,
+    "root.user",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    duplicate_root_group_uses_last_identity,
+    r#"{"group":"no-such-ubus-test-group","group":"testgroup","publish":["root.*"]}"#,
+    "root.group",
+    UBUS_STATUS_OK
+);
+publish_rule_case!(
+    duplicate_root_publish_uses_last_array,
+    r#"{"user":"testuser","publish":["denied.*"],"publish":["root.*"]}"#,
+    "root.publish",
+    UBUS_STATUS_OK
+);
+
+acl_case!(duplicate_root_access_last_value_revokes, arm, {
+    let acl = AclDir::with_grant(
+        r#"{"user":"testuser","publish":["svc.*"],"access":{"svc.*":{"methods":["ping"]}},"access":{}}"#,
+    );
+    run_nonroot(
+        "ubusd_acl duplicate_root_access_last_value_revokes",
+        arm,
+        Some(&acl),
+        &|path| {
+            let mut owner = connect_and_wait_hello(path);
+            let object = add_named(&mut owner, 1, "svc.rules");
+            let mut caller = connect_and_wait_hello(path);
+            invoke(
+                &mut caller,
+                2,
+                object,
+                "ping",
+                None,
+                UBUS_STATUS_PERMISSION_DENIED,
+            );
+        },
+    );
+});
+
 macro_rules! access_rule_case {
     ($name:ident, $access:expr, $expected:expr) => {
         acl_case!($name, arm, {
@@ -833,6 +876,27 @@ access_rule_case!(
     access_exact_object_does_not_match_child,
     r#"{"svc":{"methods":["*"]}}"#,
     UBUS_STATUS_PERMISSION_DENIED
+);
+
+access_rule_case!(
+    access_duplicate_object_last_rule_revokes,
+    r#"{"svc.rules":{"methods":["ping"]},"svc.rules":{"methods":[]}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_duplicate_object_last_rule_allows,
+    r#"{"svc.rules":{"methods":[]},"svc.rules":{"methods":["ping"]}}"#,
+    UBUS_STATUS_OK
+);
+access_rule_case!(
+    access_duplicate_methods_last_wrong_type_revokes,
+    r#"{"svc.rules":{"methods":["ping"],"methods":"*"}}"#,
+    UBUS_STATUS_PERMISSION_DENIED
+);
+access_rule_case!(
+    access_duplicate_methods_last_array_allows,
+    r#"{"svc.rules":{"methods":[],"methods":["ping"]}}"#,
+    UBUS_STATUS_OK
 );
 
 acl_case!(separate_acl_files_combine_publish_and_access, arm, {

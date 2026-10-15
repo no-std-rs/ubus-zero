@@ -89,6 +89,50 @@ static int open_needs_mode(int flags) {
     return (flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE;
 }
 
+/* rpcd file.write already fsyncs its opened file, then invokes the process-
+ * global sync(). The latter waits on every unrelated filesystem on the CI
+ * host, defeating fixture isolation and occasionally exceeding the RPC
+ * deadline. Opt in only for rpcd's private root: preserve the real fsync and
+ * its result, and omit a subsequent global flush only after that fsync
+ * succeeded on a descriptor inside the fixture. Other sync calls pass through.
+ */
+static int private_file_synced;
+
+int fsync(int fd) {
+    static int (*real)(int);
+    if (!real) real = dlsym(RTLD_NEXT, "fsync");
+    if (!real) { errno = ENOSYS; return -1; }
+    int result = real(fd);
+    int saved_errno = errno;
+    private_file_synced = 0;
+    const char *root = getenv("UBUS_TESTKIT_RPCD_SYNC_ROOT");
+    if (result == 0 && root && *root) {
+        char proc[64], path[PATH_MAX];
+        snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
+        ssize_t size = readlink(proc, path, sizeof(path) - 1);
+        if (size >= 0 && (size_t)size < sizeof(path) - 1) {
+            path[size] = '\0';
+            size_t length = strlen(root);
+            private_file_synced = !strncmp(path, root, length) &&
+                (path[length] == '/' || path[length] == '\0');
+        }
+    }
+    errno = saved_errno;
+    return result;
+}
+
+void sync(void) {
+    static void (*real)(void);
+    const char *root = getenv("UBUS_TESTKIT_RPCD_SYNC_ROOT");
+    if (private_file_synced && root && *root) {
+        private_file_synced = 0;
+        return;
+    }
+    private_file_synced = 0;
+    if (!real) real = dlsym(RTLD_NEXT, "sync");
+    if (real) real();
+}
+
 /* ---- stdio, mutations, and canonicalization used by libuci/rpcd. ----- */
 
 #define RESOLVE_REAL(name) \
