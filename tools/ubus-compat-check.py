@@ -24,11 +24,56 @@ RUNNING_LOCK = threading.Lock()
 STOP = threading.Event()
 
 
-def kill_group(process):
+def session_groups(session_id):
+    """Find live Linux groups in the suite's SID, even after reparenting."""
+    groups = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            # comm may contain spaces and ')' characters. The numeric fields
+            # start after its final ')': state, ppid, pgrp, session, ...
+            stat = (entry / "stat").read_bytes()
+            fields = stat[stat.rfind(b")") + 2:].split()
+            if int(fields[3]) == session_id and fields[0] not in (b"Z", b"X"):
+                groups.add(int(fields[2]))
+        except (OSError, ValueError, IndexError):
+            # A task can exit between enumerating /proc and reading stat.
+            continue
+    return groups
+
+
+def kill_session(process):
+    """Stop the suite's private session, including handler-created groups.
+
+    ubus-client handlers use process_group(0), so killing only the libtest
+    PGID leaves those handlers alive. They retain libtest's SID, including
+    after their parents exit. Ordinary fixture children stay in this session;
+    deliberately creating a new session is outside this cleanup contract.
+    """
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    if sys.platform != "linux":
+        return
+    deadline = time.monotonic() + 1
+    while True:
+        groups = session_groups(process.pid)
+        if not groups:
+            return
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        # Re-scan to catch children forked just before a parent was stopped.
+        # Bound cleanup if the kernel cannot yet finish an uninterruptible IO.
+        if time.monotonic() >= deadline:
+            print(f"Suite session {process.pid} still has live groups after SIGKILL: "
+                  f"{sorted(groups)}", file=sys.stderr, flush=True)
+            return
+        time.sleep(.01)
 
 
 def positive_env(name, default):
@@ -87,28 +132,28 @@ def run_test(executable, label, env, threads, timeout):
             RUNNING.add(process)
         try:
             if STOP.is_set():
-                kill_group(process)
+                kill_session(process)
             try:
                 output, _ = process.communicate(timeout=timeout)
                 status = process.returncode
             except subprocess.TimeoutExpired:
                 # Killing only libtest bypasses harness Drop and leaves its
                 # brokers/rpcd/CLI children alive. Each suite owns a session.
-                kill_group(process)
+                kill_session(process)
                 output, _ = process.communicate()
                 output += f"\nTimed out after {timeout}s\n"
                 status = 124
             except BaseException:
-                kill_group(process)
+                kill_session(process)
                 process.communicate()
                 raise
             return label, status, output, time.monotonic() - started
         finally:
             # A panicking suite can drop a plain std::process::Child without
             # stopping it. Descendants with detached output do not keep
-            # communicate() open, so reap the suite's whole private group
+            # communicate() open, so stop the suite's whole private session
             # even when the executable itself has already returned.
-            kill_group(process)
+            kill_session(process)
             with RUNNING_LOCK:
                 RUNNING.discard(process)
             if process.stdout:
@@ -180,7 +225,7 @@ def main():
                 future.cancel()
             with RUNNING_LOCK:
                 for process in RUNNING:
-                    kill_group(process)
+                    kill_session(process)
             return 130
 
     docs = subprocess.run([*cargo, "--doc", "--no-fail-fast"], cwd=ROOT, env=env, check=False)

@@ -22,7 +22,71 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 
 
+def write_handler_probe(root, status=0, record_name="handler.json"):
+    """Use the real process_group(0) contract of ubus-client's handlers."""
+    records = root / record_name if record_name is not None else None
+    handler = root / "handler.py"
+    handler.write_text(
+        "import json,os,pathlib,subprocess,sys,time\n"
+        "suite=int(sys.argv[2])\n"
+        "child=subprocess.Popen(['sleep','60'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "pids=[suite,os.getpid(),child.pid]\n"
+        "record={'pids':pids,'sessions':[os.getsid(pid) for pid in pids],"
+        "'groups':[os.getpgid(pid) for pid in pids]}\n"
+        "path=pathlib.Path(sys.argv[1]); temporary=path.with_suffix('.tmp')\n"
+        "temporary.write_text(json.dumps(record)); temporary.replace(path)\n"
+        "time.sleep(60)\n"
+    )
+    probe = root / "probe"
+    record_expression = (
+        f"pathlib.Path({str(records)!r})" if records is not None else
+        f"pathlib.Path({str(root)!r})/(os.environ['UBUS_ZERO_FAULT']+'.json')"
+    )
+    probe.write_text(
+        f"#!{sys.executable}\nimport json,os,pathlib,signal,subprocess,sys,time\n"
+        "assert signal.getsignal(signal.SIGINT)!=signal.SIG_IGN\n"
+        f"record={record_expression}\n"
+        f"subprocess.Popen([{sys.executable!r},{str(handler)!r},str(record),str(os.getpid())],"
+        "process_group=0,start_new_session=False,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+        "deadline=time.monotonic()+5\n"
+        "while not record.exists():\n"
+        " if time.monotonic()>=deadline: raise RuntimeError('handler did not start')\n"
+        " time.sleep(.01)\n"
+        "print(record.read_text(),flush=True)\n"
+        + ("time.sleep(60)\n" if status is None else f"sys.exit({status})\n")
+    )
+    probe.chmod(0o700)
+    return probe, records
+
+
+def stop_probe_processes(records):
+    if records.exists():
+        for pid in json.loads(records.read_text())["pids"]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 class CompatRunnerTest(unittest.TestCase):
+    def assert_handler_session_stopped(self, record):
+        suite, handler, nested = record["pids"]
+        self.assertEqual(record["sessions"], [suite, suite, suite])
+        self.assertEqual(record["groups"], [suite, handler, handler])
+        self.assertNotEqual(suite, handler)
+        for pid in (suite, handler, nested):
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    stat = Path(f"/proc/{pid}/stat").read_bytes()
+                    state = stat[stat.rfind(b")") + 2:].split()[0]
+                except (FileNotFoundError, ProcessLookupError):
+                    state = None
+                if state in (None, b"Z") or time.monotonic() >= deadline:
+                    break
+                time.sleep(.01)
+            self.assertIn(state, (None, b"Z"), f"handler session member {pid} survived")
+
     def test_cargo_artifacts_keep_distinct_binaries_without_duplicates(self):
         def artifact(path, test=True):
             return {"reason": "compiler-artifact", "profile": {"test": test},
@@ -38,7 +102,7 @@ class CompatRunnerTest(unittest.TestCase):
 
     def test_binary_failure_is_retained_with_diagnostics(self):
         with patch.object(runner.subprocess, "Popen") as run, \
-             patch.object(runner, "kill_group"):
+             patch.object(runner, "kill_session"):
             run.return_value.communicate.return_value = ("named regression failed\n", None)
             run.return_value.returncode = 101
             label, code, output, _ = runner.run_test("/tmp/test", "fd", {}, 8, 60)
@@ -47,7 +111,7 @@ class CompatRunnerTest(unittest.TestCase):
 
     def test_timeout_is_a_failure_with_partial_diagnostics(self):
         with patch.object(runner.subprocess, "Popen") as spawn, \
-             patch.object(runner, "kill_group") as kill:
+             patch.object(runner, "kill_session") as kill:
             spawn.return_value.communicate.side_effect = [
                 subprocess.TimeoutExpired([], 60), ("last active case\n", None),
             ]
@@ -112,6 +176,26 @@ class CompatRunnerTest(unittest.TestCase):
                         except ProcessLookupError:
                             pass
 
+    @unittest.skipUnless(sys.platform == "linux", "native Linux session cleanup")
+    def test_handler_groups_and_nested_children_stop_on_exit_or_timeout(self):
+        for status in (0, 7, None):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                probe, records = write_handler_probe(root, status)
+                # A different suite/session must remain untouched by cleanup.
+                unrelated = subprocess.Popen(["sleep", "60"], start_new_session=True)
+                try:
+                    _, code, output, _ = runner.run_test(
+                        str(probe), "handler", os.environ.copy(), 1, 1 if status is None else 5)
+                    self.assertEqual(code, 124 if status is None else status)
+                    record = json.loads(output.splitlines()[0])
+                    self.assert_handler_session_stopped(record)
+                    self.assertIsNone(unrelated.poll(), "cleanup killed another suite/session")
+                finally:
+                    stop_probe_processes(records)
+                    unrelated.kill()
+                    unrelated.wait()
+
     @unittest.skipUnless(sys.platform == "linux", "native Linux process cleanup")
     def test_fault_profile_interrupt_stops_both_runners_and_their_children(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,45 +213,26 @@ class CompatRunnerTest(unittest.TestCase):
                 "  print(json.dumps({'reason':'compiler-artifact','target':{'name':name,"
                 "'kind':[kind]},'profile':{'test':test},'executable':str(path)}))\n")
             cargo.chmod(0o700)
-            probe = root / "probe"
-            probe.write_text(f"#!{sys.executable}\nimport os,pathlib,signal,subprocess,time\n"
-                "assert signal.getsignal(signal.SIGINT)!=signal.SIG_IGN\n"
-                "child=subprocess.Popen(['sleep','60'])\n"
-                "root=pathlib.Path(__file__).parent\n"
-                "(root/(os.environ['UBUS_ZERO_FAULT']+'.pid')).write_text("
-                "str(os.getpid())+' '+str(child.pid))\n"
-                "time.sleep(60)\n")
-            probe.chmod(0o700)
+            write_handler_probe(root, status=None, record_name=None)
             env = os.environ.copy()
             env.update(UBUS_ZERO_TEST_JOBS="1", RUST_TEST_THREADS="1")
             process = subprocess.Popen(["bash", str(tools / "ubus-fault-check.sh")],
                 cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            pids = []
             try:
                 deadline = time.monotonic() + 5
-                records = [root / f"{profile}.pid" for profile in ("fragment=3", "eintr_every=3")]
+                records = [root / f"{profile}.json" for profile in ("fragment=3", "eintr_every=3")]
                 while not all(path.exists() and path.stat().st_size for path in records):
                     if time.monotonic() >= deadline:
                         self.fail("both fault profiles did not start")
                     time.sleep(.01)
-                for path in records:
-                    pids.extend(map(int, path.read_text().split()))
                 process.terminate()
                 output, _ = process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 143, output)
-                for pid in pids:
-                    try:
-                        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
-                    except (FileNotFoundError, ProcessLookupError):
-                        state = None
-                    self.assertIn(state, (None, "Z"), f"profile child {pid} survived interrupt")
+                for path in records:
+                    self.assert_handler_session_stopped(json.loads(path.read_text()))
             finally:
-                for path in root.glob("*.pid"):
-                    for pid in map(int, path.read_text().split()):
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                for path in root.glob("*.json"):
+                    stop_probe_processes(path)
                 if process.poll() is None:
                     process.kill()
                 process.communicate()
