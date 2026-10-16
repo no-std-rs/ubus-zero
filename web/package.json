@@ -1,0 +1,12 @@
+{
+  "name": "ubus-zero-flasher",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/config.test.mjs",
+    "test:browser": "playwright test",
+    "build": "esbuild src/installer.js --bundle --format=esm --outfile=dist/installer.js"
+  },
+  "dependencies": { "esp-web-tools": "10.4.0" },
+  "devDependencies": { "@playwright/test": "1.61.1", "esbuild": "0.25.12" }
+}

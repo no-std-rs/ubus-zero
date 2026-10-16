@@ -1,0 +1,65 @@
+[package]
+name = "ubus-router-display"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "no_std OpenWrt ubus dashboard for the GUITION ESP32-C3 round display"
+
+# Keep the board's target and dependencies outside the hosted workspace.
+[workspace]
+
+[[bin]]
+name = "router-display"
+path = "src/main.rs"
+required-features = ["firmware"]
+test = false
+bench = false
+
+[features]
+default = []
+firmware = [
+    "dep:esp-hal", "dep:esp-rtos", "dep:esp-radio", "dep:esp-alloc",
+    "dep:esp-backtrace", "dep:esp-println", "dep:esp-bootloader-esp-idf",
+    "dep:embassy-executor", "dep:embassy-net", "dep:embassy-time",
+    "dep:embassy-sync", "dep:embassy-futures", "dep:static_cell", "dep:reqwless", "dep:log",
+    "dep:portable-atomic",
+    "dep:esp-storage", "dep:embedded-storage",
+]
+
+[dependencies]
+ubus = { package = "ubus-zero", path = "../..", default-features = false, features = ["json", "portable-atomic"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+embedded-graphics = "0.8.2"
+embedded-hal = "1"
+
+esp-hal = { version = "=1.1.1", features = ["esp32c3", "unstable", "log-04", "exception-handler"], optional = true }
+esp-rtos = { version = "0.3", features = ["esp32c3", "esp-radio", "embassy"], optional = true }
+esp-radio = { version = "0.18", features = ["esp32c3", "wifi", "log-04", "unstable"], optional = true }
+esp-alloc = { version = "0.10", optional = true }
+esp-backtrace = { version = "0.19", features = ["esp32c3", "panic-handler", "println"], optional = true }
+esp-println = { version = "0.17", default-features = false, features = ["esp32c3", "jtag-serial", "log-04"], optional = true }
+esp-bootloader-esp-idf = { version = "0.5", features = ["esp32c3"], optional = true }
+embassy-executor = { version = "0.10", optional = true }
+embassy-net = { version = "0.9", features = ["dhcpv4", "dns", "tcp", "medium-ethernet"], optional = true }
+embassy-time = { version = "0.5", optional = true }
+embassy-sync = { version = "0.8", optional = true }
+embassy-futures = { version = "0.1", optional = true }
+static_cell = { version = "2", optional = true }
+reqwless = { version = "0.14", default-features = false, optional = true }
+log = { version = "0.4", default-features = false, optional = true }
+# The board is single core and has no atomic compare-and-swap instruction.
+portable-atomic = { version = "1", features = ["unsafe-assume-single-core"], optional = true }
+esp-storage = { version = "0.9", features = ["esp32c3"], optional = true }
+embedded-storage = { version = "0.3", optional = true }
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+lto = "fat"
+debug = 2
+panic = "abort"

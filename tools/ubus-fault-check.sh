@@ -48,12 +48,16 @@ set -euo pipefail
 run_profile() {
   local profile="$1"; shift
   echo "== UBUS_ZERO_FAULT=${profile} :: strict workspace"
-  exec env UBUS_ZERO_FAULT="${profile}" UBUS_ZERO_COMPAT=require \
+  exec env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/fault-profiles/${profile%%=*}" \
+    UBUS_ZERO_FAULT="${profile}" UBUS_ZERO_COMPAT=require \
     python3 tools/ubus-compat-check.py
 }
 
-# Separate child environments keep the profiles independent. Capture each
-# profile's output together while exercising both profiles concurrently.
+# Cargo's build lock does not cover the runner's later execution of reported
+# artifacts. Isolate target directories so another profile's build/doctests
+# cannot replace a queued executable or a live fixture library. Keep persistent
+# per-profile directories below the caller's target root for incremental builds.
+# Capture each profile's output while exercising both profiles concurrently.
 logs="$(mktemp -d)"
 fragment_pid=
 eintr_pid=
