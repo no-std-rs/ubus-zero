@@ -1,0 +1,4 @@
+# Same flash mode as razem-tag; QIO does not boot on this board.
+[flash]
+mode = "dio"
+frequency = "80MHz"

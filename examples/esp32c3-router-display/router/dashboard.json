@@ -1,0 +1,13 @@
+{
+  "ubus-dashboard": {
+    "description": "Read-only router statistics for an ESP32 display",
+    "read": {
+      "ubus": {
+        "system": ["board", "info"],
+        "network.interface.*": ["status"],
+        "network.device": ["status"],
+        "iwinfo": ["info", "assoclist"]
+      }
+    }
+  }
+}

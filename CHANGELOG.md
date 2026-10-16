@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- A `no_std` ESP32-C3 round-display example for live OpenWrt statistics over
+  uhttpd's ubus bridge, with read-only rpcd setup and touch-controlled pages.
+- Optional portable atomics for shared-buffer transports on targets such as
+  ESP32-C3 without native pointer-width atomics.
 - Parallel compatibility coverage for ACL identities and reloads, descriptor
   passing, daemon lifecycle, upstream and Rust CLIs, and real rpcd/UCI/file
   consumers, with isolated per-process fixtures.
