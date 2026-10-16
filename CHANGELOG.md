@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...ubus-zero-v0.3.0) (2026-10-16)
+
+
+### Features
+
+* publish C3 firmware and add a GitHub Pages USB flasher ([#21](https://github.com/no-std-rs/ubus-zero/issues/21)) ([89422c0](https://github.com/no-std-rs/ubus-zero/commit/89422c0c9e36b25e2de9bd9279e9167f304f4177))
+* add no_std ESP32-C3 OpenWrt router dashboard ([#20](https://github.com/no-std-rs/ubus-zero/issues/20)) ([8babfbb](https://github.com/no-std-rs/ubus-zero/commit/8babfbbe3b341250989affa1097ad83c27b2db92))
+
+### Bug Fixes
+
+* **ci:** isolate Cargo artifacts for concurrent fault profiles ([#23](https://github.com/no-std-rs/ubus-zero/issues/23)) ([051b507](https://github.com/no-std-rs/ubus-zero/commit/051b507b5a41a7207385381e498202516bb8094d))
+* **release:** capture released versions without mirroring their crates.io entries ([#18](https://github.com/no-std-rs/ubus-zero/issues/18)) ([36109d2](https://github.com/no-std-rs/ubus-zero/commit/36109d260675c6d0af0b680ab15944e856519bd2))
+
 All notable changes to `ubus-zero` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
