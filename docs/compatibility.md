@@ -184,6 +184,10 @@ exercise their own explicit fragmentation and ancillary-data boundaries. CLI,
 rpcd, lifecycle, and direct FD cases also run under the broker write-fault
 profile.
 
+Each profile builds into its own persistent directory under
+`${CARGO_TARGET_DIR:-target}/fault-profiles/`. This keeps a concurrent Cargo
+build or doctest phase from replacing executables another profile has built.
+
 `max_write` and receive-side EINTR remain diagnostic profiles because they
 expose known reference-broker edge behavior rather than a portable contract.
 

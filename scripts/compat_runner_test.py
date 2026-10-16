@@ -261,6 +261,61 @@ class CompatRunnerTest(unittest.TestCase):
                 if docs_status:
                     self.assertIn("Failed: doctests", result.stderr)
 
+    @unittest.skipUnless(sys.platform == "linux", "native Linux fault profiles")
+    def test_fault_profiles_keep_executables_when_another_profile_rebuilds(self):
+        for custom_target in (False, True):
+            with self.subTest(custom_target=custom_target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tools = write_fake_workspace(root)
+                # Cargo locks only compilation. Model a rebuild removing stale
+                # executables before either runner launches its reported paths.
+                (tools / "cargo.sh").write_text(
+                    f"#!{sys.executable}\n"
+                    "import fcntl,json,os,pathlib,sys,time\n"
+                    "root=pathlib.Path(__file__).resolve().parent.parent\n"
+                    "profile=os.environ['UBUS_ZERO_FAULT']\n"
+                    "target=pathlib.Path(os.environ.get('CARGO_TARGET_DIR','target')).resolve()\n"
+                    "suite=target/('suite-'+profile)\n"
+                    "broker=target/'ubusd'\n"
+                    "if '--no-run' in sys.argv:\n"
+                    " with (root/'compile.lock').open('w') as lock:\n"
+                    "  fcntl.flock(lock,fcntl.LOCK_EX)\n"
+                    "  target.mkdir(parents=True,exist_ok=True)\n"
+                    "  for old in target.glob('suite-*'): old.unlink()\n"
+                    "  broker.touch()\n"
+                    "  code='import os\\nassert os.environ[\"UBUS_ZERO_UBUSD_RS\"] == '+repr(str(broker))+'\\n'\n"
+                    f"  suite.write_text('#!{sys.executable}\\n'+code)\n"
+                    "  suite.chmod(0o700)\n"
+                    "  (root/(profile+'.build')).write_text(str(target))\n"
+                    " deadline=time.monotonic()+5\n"
+                    " while not all((root/(p+'.build')).exists() for p in ('fragment=3','eintr_every=3')):\n"
+                    "  if time.monotonic()>deadline: raise RuntimeError('profiles did not build concurrently')\n"
+                    "  time.sleep(.01)\n"
+                    " for name,kind,test,path in [('ubusd','bin',False,broker),('suite','test',True,suite)]:\n"
+                    "  print(json.dumps({'reason':'compiler-artifact','target':{'name':name,'kind':[kind]},"
+                    "'profile':{'test':test},'executable':str(path)}))\n"
+                    "elif '--doc' in sys.argv:\n"
+                    " (root/(profile+'.docs')).touch()\n"
+                )
+                env = os.environ.copy()
+                env.pop("UBUS_ZERO_UBUSD_RS", None)
+                env.pop("CARGO_TARGET_DIR", None)
+                env.update(UBUS_ZERO_TEST_JOBS="1", RUST_TEST_THREADS="1")
+                expected_root = root / "target"
+                if custom_target:
+                    expected_root = root / "custom target"
+                    env["CARGO_TARGET_DIR"] = str(expected_root)
+                result = subprocess.run(["bash", str(tools / "ubus-fault-check.sh")],
+                    cwd=root, env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                targets = [Path((root / f"{profile}.build").read_text())
+                           for profile in ("fragment=3", "eintr_every=3")]
+                self.assertNotEqual(*targets)
+                for target, profile in zip(targets, ("fragment=3", "eintr_every=3")):
+                    self.assertTrue(target.is_relative_to(expected_root))
+                    self.assertTrue((target / f"suite-{profile}").is_file())
+                    self.assertTrue((root / f"{profile}.docs").exists())
+
     @unittest.skipUnless(sys.platform == "linux", "native Linux process cleanup")
     def test_fault_profile_interrupt_stops_both_runners_and_their_children(self):
         for phase in ("build", "suite", "doc"):
