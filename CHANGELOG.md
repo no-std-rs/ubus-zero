@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...ubus-zero-v0.2.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **release:** capture released versions without mirroring their crates.io entries ([#18](https://github.com/no-std-rs/ubus-zero/issues/18)) ([36109d2](https://github.com/no-std-rs/ubus-zero/commit/36109d260675c6d0af0b680ab15944e856519bd2))
+
 All notable changes to `ubus-zero` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
