@@ -158,6 +158,11 @@ animation gadget's pin configuration, a read-only rpcd account/ACL, router
 setup, and build/flash instructions. It connects over Wi-Fi through uhttpd's
 `/ubus` JSON-RPC bridge using this crate's blobmsg/JSON codecs.
 
+[Install the public firmware over USB](https://no-std-rs.github.io/ubus-zero/)
+from a desktop browser with Web Serial. The main-branch build is published to
+Runnerless and mirrored on GitHub Pages with checksums. The flasher writes your
+settings directly to the device; the public binary contains no credentials.
+
 Targets without pointer-width atomics, including ESP32-C3, can enable
 `portable-atomic` for the shared-buffer transport helpers and spin mutex.
 The application must configure `portable-atomic`'s appropriate fallback; this

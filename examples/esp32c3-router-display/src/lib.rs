@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+pub mod config;
 pub mod panel;
 pub mod render;
 pub mod rpc;

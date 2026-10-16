@@ -104,6 +104,13 @@ Protocol references: [uhttpd ubus bridge](https://github.com/openwrt/uhttpd/blob
 
 ## Build and flash
 
+The [public USB installer](https://no-std-rs.github.io/ubus-zero/) can flash the
+latest main build without compiling Rust. Enter the Wi-Fi and read-only router
+account settings there; the page writes them directly to a dedicated flash
+partition over USB. The downloadable factory binary has no embedded credentials.
+Installing the bare binary alone displays a setup screen until settings are
+provided. The browser checks the firmware SHA-256 before enabling installation.
+
 This directory is a separate Cargo workspace using the same esp-hal 1.1.1 /
 esp-radio 0.18 generation as `razem-tag`. Its lockfile is committed. The stable
 toolchain has a prebuilt `riscv32imc-unknown-none-elf` target; no nightly or
@@ -121,10 +128,14 @@ cargo run --locked --release --features firmware
 
 For the router script's default listener on a typical GL.iNet LAN,
 `UBUS_URL=http://192.168.8.1:8080/ubus`. `config.sh` is ignored by Git. Credentials
-are compiled into the firmware, so keep firmware artifacts private. The flash
-configuration uses the source gadget's DIO/80 MHz setting; its QIO mode does
-not boot reliably. This example does not access or erase Matter/NVS state, but
-flashing replaces the application.
+are compiled into a local build when those environment variables are set, so keep
+custom builds private. Flash-partition settings take precedence. The public build
+script explicitly clears all configuration environment variables.
+The flash configuration uses the source gadget's DIO/80 MHz setting; its QIO mode
+does not boot reliably. The public factory image includes the bootloader and
+partition table, and can replace saved flash data. Back up existing device state
+before changing firmware. The settings partition occupies `0x3f0000..0x400000`;
+the factory app ends at `0x3f0000`. This layout is for the 4 MB GUITION board.
 
 The first counter sample establishes a baseline. Rates appear after the next
 successful sample and use measured elapsed time and 64-bit counters. Router
