@@ -6634,3 +6634,58 @@ fn duplicate_integer_policy_rejects_bad_widths(#[case] arm: BrokerArm) {
         }
     }
 }
+
+// These fields are UNSPEC in the pinned C broker policy: arbitrary widths
+// remain eligible and the last NoReply value's first byte controls the ACK.
+fn duplicate_noreply_policy_body(path: &str) {
+    let mut transport = UnixUbusTransport::connect(path).expect("connect");
+    recv_until(&mut transport, Duration::from_secs(5), |frame| {
+        frame.hdr.ty == MsgType::Hello
+    })
+    .expect("HELLO");
+    let object = raw_add_anonymous(&mut transport, 10);
+    let cases: [(&[u8], &[u8], bool); 4] = [
+        (&[1], &[0, 0, 0, 1], true),
+        (&[0, 0, 0, 1], &[1], false),
+        (&[1], &[0, 1], true),
+        (&[0, 0, 0, 1], &[1, 0], false),
+    ];
+    for (index, (first, last, expected_ack)) in cases.into_iter().enumerate() {
+        let seq = 20 + index as u16 * 2;
+        let mut env = EnvBuilder::new();
+        env.push_u32(UbusAttr::ObjId, object);
+        env.push_str(UbusAttr::Method, "probe");
+        env.push_bytes_id(UbusAttr::NoReply as u8, first);
+        env.push_bytes_id(UbusAttr::NoReply as u8, last);
+        transport
+            .send(&Frame::to_peer(MsgType::Notify, seq, object, env.finish()))
+            .expect("duplicate NoReply NOTIFY");
+        // A same-connection PING fences the preceding NOTIFY without sleeps.
+        transport
+            .send(&Frame::to_peer(
+                MsgType::Ping,
+                seq + 1,
+                object,
+                EnvBuilder::new().finish(),
+            ))
+            .expect("PING fence");
+        let acknowledged = std::cell::Cell::new(false);
+        recv_until(&mut transport, Duration::from_secs(5), |frame| {
+            if frame.hdr.seq == seq && frame.hdr.ty == MsgType::Status {
+                assert_eq!(
+                    find(&frame.payload, UbusAttr::Status).and_then(|a| a.as_u32()),
+                    Some(0)
+                );
+                acknowledged.set(true);
+            }
+            frame.hdr.seq == seq + 1 && frame.hdr.ty == MsgType::Status
+        })
+        .expect("PING fence STATUS");
+        assert_eq!(
+            acknowledged.get(),
+            expected_ack,
+            "NoReply duplicate case {index}"
+        );
+    }
+}
+matrix_scenario!(duplicate_noreply_policy, duplicate_noreply_policy_body);

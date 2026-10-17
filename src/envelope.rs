@@ -323,6 +323,9 @@ fn policy_accepts(attr: &EnvAttr<'_>, id: UbusAttr) -> bool {
         UbusAttr::ObjPath | UbusAttr::Method | UbusAttr::User | UbusAttr::Group => {
             attr.payload.last() == Some(&0)
         }
+        // ubusd's ubus_policy leaves Target, Active and NoReply UNSPEC.
+        // Their widths are not filtered: e.g. a later u32 NoReply=1 is
+        // accepted and its first byte (zero) overrides an earlier INT8=1.
         _ => true,
     }
 }

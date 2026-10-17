@@ -74,17 +74,20 @@ def build_baseline(reference, directory):
     raise ValueError("Cargo did not report the baseline broker executable")
 
 
-def cargo_artifacts(arguments, environment=None):
+def cargo_artifacts(arguments, environment=None, include_libraries=False):
     result = processes.run_cargo(["cargo", "build", "--locked", *arguments, "--message-format=json"],
                                 environment or os.environ.copy(), capture_stdout=True)
     result.check_returncode()
     binaries, profiles = {}, {}
     for line in result.stdout.splitlines():
         artifact = json.loads(line)
-        if artifact.get("reason") == "compiler-artifact" and artifact.get("executable"):
+        if artifact.get("reason") == "compiler-artifact":
             name = artifact["target"]["name"]
-            binaries[name] = Path(artifact["executable"]).resolve()
-            profiles[name] = artifact["profile"]
+            if artifact.get("executable"):
+                binaries[name] = Path(artifact["executable"]).resolve()
+                profiles[name] = artifact["profile"]
+            elif include_libraries and "custom-build" not in artifact["target"]["kind"]:
+                profiles[name] = artifact["profile"]
     return binaries, profiles
 
 
@@ -101,18 +104,24 @@ def build():
 def build_profile_matrix(directory):
     directory.mkdir(parents=True, exist_ok=True)
     arms, provenance = {}, {}
+    dependency_profiles = None
     for level in ("z", "s", "2", "3"):
-        env = {**os.environ, "CARGO_PROFILE_RELEASE_OPT_LEVEL": level}
         binaries, profiles = cargo_artifacts(
             ["--release", "--target-dir", str(directory / "target"), "-p", "ubusd", "--bin", "ubusd",
-             "--config", "profile.release.package.ubusd.opt-level=" + json.dumps(int(level) if level.isdigit() else level)], env)
+             "--config", "profile.release.package.ubusd.opt-level=" + json.dumps(int(level) if level.isdigit() else level)],
+            os.environ.copy(), include_libraries=True)
         if profiles["ubusd"]["opt_level"] != level:
             raise ValueError("Cargo did not honor the requested broker optimization level")
+        dependencies = {name: profile for name, profile in profiles.items() if name != "ubusd"}
+        if dependency_profiles is not None and dependencies != dependency_profiles:
+            raise ValueError("dependency profiles changed between broker optimization arms")
+        dependency_profiles = dependencies
         name = "profile-" + level
         path = directory / ("ubusd-" + level)
         shutil.copy2(binaries["ubusd"], path)
         arms[name] = path
-        provenance[name] = {"opt_level": level, "cargo_artifact_profile": profiles["ubusd"]}
+        provenance[name] = {"opt_level": level, "cargo_artifact_profile": profiles["ubusd"],
+                            "dependency_artifact_profiles": dependencies}
     return arms, provenance
 
 
@@ -251,14 +260,15 @@ def write_reports(output, result):
         for broker in brokers:
             rows.append({"workload": comparison["workload"], "clients": comparison["clients"],
                          "payload_bytes": comparison["payload_bytes"], "broker": broker,
+                         "iterations_per_client": comparison["iterations_per_client"],
                          **comparison[broker]})
     with (output / "summary.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
     (output / "performance.json").write_text(json.dumps(result, indent=2) + "\n")
-    table = ["| Workload | Broker | ops/s | p50 µs | p95 µs | p99 µs | broker CPU µs/op | RSS KiB | vs C (95% interval) |",
-             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+    table = ["| Workload | Broker | Iterations/client | ops/s | p50 µs | p95 µs | p99 µs | broker CPU µs/op | RSS KiB | vs C (95% interval) |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
     body = []
     for comparison in result["comparisons"]:
         name = label((comparison["workload"], comparison["clients"], comparison["payload_bytes"]))
@@ -272,8 +282,9 @@ def write_reports(output, result):
             interval = (f"{ratio:.3f}x [{low:.3f}, {high:.3f}]" if low is not None else
                         f"{ratio:.3f}x [insufficient trials]" if ratio is not None else "—")
             values.append(interval)
-            table.append(f"| {name} | {broker} | " + " | ".join(values) + " |")
-            body.append(f'<tr><th>{html.escape(name)}</th><td>{broker}</td>'
+            iterations = comparison["iterations_per_client"]
+            table.append(f"| {name} | {broker} | {iterations:,} | " + " | ".join(values) + " |")
+            body.append(f'<tr><th>{html.escape(name)}</th><td>{broker}</td><td>{iterations:,}</td>'
                         f'<td><meter min="0" max="{maximum}" value="{stats["operations_per_second"]}"></meter> '
                         + values[0] + '</td>' + ''.join(f'<td>{value}</td>' for value in values[1:]) + '</tr>')
     size_md, size_html = [], []
@@ -303,9 +314,10 @@ meter{width:7rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}small{color:#52
 .scroll{overflow-x:auto}details{margin-top:2rem}</style><h1>ubusd performance comparison</h1>'''
         + f'<p>{html.escape(notice)}</p><p><small>Commit {html.escape(result["metadata"]["commit"])} · '
         + f'{result["configuration"]["samples"]} samples per broker/workload · '
-        + f'{result["configuration"]["iterations"]} operations per client per sample</small></p>'
-        + '<div class="scroll"><table><thead><tr><th>Workload</th><th>Broker</th><th>ops/s</th>'
-        + '<th>p50 µs</th><th>p95 µs</th><th>p99 µs</th></tr></thead><tbody>' + ''.join(body)
+        + 'iterations per client per sample are shown per row</small></p>'
+        + '<div class="scroll"><table><thead><tr><th>Workload</th><th>Broker</th><th>Iterations/client</th><th>ops/s</th>'
+        + '<th>p50 µs</th><th>p95 µs</th><th>p99 µs</th>'
+        + '<th>Broker CPU µs/op</th><th>RSS KiB</th><th>vs C (95% interval)</th></tr></thead><tbody>' + ''.join(body)
         + '</tbody></table></div>' + build_html + '<details><summary>Method, machine and build provenance</summary><pre>'
         + html.escape(json.dumps({"configuration": result["configuration"], **result["metadata"]}, indent=2))
         + '</pre></details></html>')
@@ -324,7 +336,7 @@ def main():
     parser.add_argument("--pipeline-iterations", type=int, default=200000,
                         help="operations/client in full pipelined samples (default: 200000)")
     parser.add_argument("--scaling-iterations", type=int, default=200,
-                        help="operations/client in registry/ACL/fanout trials (default: 200)")
+                        help="operations/client in 1000-object list trials (default: 200)")
     parser.add_argument("--profile-matrix", action="store_true",
                         help="also compare Rust release opt-level z, s, 2 and 3 with the same speed-optimized driver")
     parser.add_argument("--warmup", type=int, default=100)
@@ -377,7 +389,7 @@ def measure(args, upstream, baseline_directory):
         workload, clients, payload_bytes = case
         iterations = (getattr(args, "pipeline_iterations", args.iterations)
                       if workload == "ping-pipeline" and not args.smoke else args.iterations)
-        if workload in {"lookup-many", "lookup-prefix", "acl-lookup", "event-fanout", "notify-fanout"} and not args.smoke:
+        if workload == "lookup-many" and not args.smoke:
             iterations = getattr(args, "scaling_iterations", args.iterations)
         for repeat in range(args.samples):
             order = list(brokers)
@@ -400,6 +412,7 @@ def measure(args, upstream, baseline_directory):
             stats[broker].update({"throughput_ratio_to_c": stats[broker]["operations_per_second"] / stats["upstream"]["operations_per_second"],
                                  "ratio_to_c_ci95_low": low, "ratio_to_c_ci95_high": high})
         comparisons.append({"workload": workload, "clients": clients, "payload_bytes": payload_bytes,
+                            "iterations_per_client": iterations,
                             **stats, "samples": samples})
     for measured_file in [*provenance["binaries"].values(), *provenance["reference_shared_libraries"].values()]:
         if digest(Path(measured_file["path"])) != measured_file["sha256"]:

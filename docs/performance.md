@@ -28,9 +28,10 @@ cargo run --release -p ubusd --example footprint
 ```
 
 `--iterations` counts operations per client per sample (default 5,000).
-Pipelined trials use `--pipeline-iterations` (200,000), and registry/ACL/fanout
-trials use `--scaling-iterations` (200), because each operation can deliver up to
-1,000 replies. `--samples` defaults to six and `--warmup` to 100. Repeat
+Pipelined trials use `--pipeline-iterations` (200,000), and the 1,000-object
+list uses `--scaling-iterations` (200). Prefix, ACL and fanout trials use the
+ordinary 5,000 iterations. Each report row records its actual count. `--samples`
+defaults to six and `--warmup` to 100. Repeat
 `--workload` to select a subset. `--upstream` selects an exact reference binary;
 `--output` selects the report directory. Missing fixtures or failed builds fail
 rather than skip or fall back to debug executables.
@@ -55,9 +56,10 @@ Cargo's executable paths and actual artifact profiles are read from its JSON
 output; `CARGO_TARGET_DIR` is honored.
 
 `--profile-matrix` additionally builds Rust brokers at `opt-level=z`, `s`, `2`
-and `3`, retaining the other release settings and the same driver. Every arm's
-actual Cargo profile, SHA-256 and executable size is recorded. Compilation
-finishes before host load/provenance capture and before trials. Temporary matrix
+and `3`, changing only the `ubusd` package override. Dependency profiles and
+the driver stay fixed; differing dependency profiles fail the run. Every arm's
+actual Cargo profiles (including dependencies), SHA-256 and executable size are
+recorded. Compilation finishes before host load/provenance capture and before trials. Temporary matrix
 binaries are removed after reporting. Choose enough trials to balance starting
 positions: multiples of the number of arms (two normally, three with a baseline,
 six with the matrix, seven with both).

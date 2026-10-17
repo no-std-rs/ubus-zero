@@ -1,5 +1,7 @@
 """Measurement oracles: concurrent wall time, exact samples and safe report rendering."""
 
+import csv
+from html.parser import HTMLParser
 import importlib.util
 import json
 import os
@@ -50,6 +52,7 @@ class BenchmarkTests(unittest.TestCase):
         result = {"metadata": {"commit": "<script>unsafe</script>"},
                   "configuration": {"samples": 1, "iterations": 2},
                   "comparisons": [{"workload": "echo", "clients": 4, "payload_bytes": 4096,
+                                   "iterations_per_client": 2,
                                    "rust": stats, "upstream": stats}]}
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -60,6 +63,69 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("not a timing gate", report)
             self.assertEqual(json.loads((output / "performance.json").read_text()), result)
             self.assertEqual(len((output / "summary.csv").read_text().splitlines()), 3)
+
+    def test_report_columns_and_per_workload_counts_agree(self):
+        class Tables(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.tables = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "table":
+                    self.tables.append([])
+                elif tag == "tr":
+                    self.tables[-1].append(0)
+                elif tag in {"th", "td"}:
+                    self.tables[-1][-1] += 1
+
+        stats = benchmark.summarize([self.sample()])
+        result = {"metadata": {"commit": "current", "binaries": {"rust": {"bytes": 1024}}},
+                  "configuration": {"samples": 1, "iterations": 5000},
+                  "comparisons": [{"workload": name, "clients": 1, "payload_bytes": 0,
+                                   "iterations_per_client": count, "rust": stats, "upstream": stats}
+                                  for name, count in [("ping", 5000), ("ping-pipeline", 200000),
+                                                      ("lookup-many", 200)]]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            benchmark.write_reports(output, result)
+            report = (output / "report.html").read_text()
+            tables = Tables()
+            tables.feed(report)
+            self.assertEqual(tables.tables, [[10] * 7, [2, 2]])
+            for label in ("Iterations/client", "Broker CPU µs/op", "RSS KiB", "vs C (95% interval)"):
+                self.assertIn(f"<th>{label}</th>", report)
+            for count in ("5,000", "200,000", "200"):
+                self.assertIn(f"<td>{count}</td>", report)
+                self.assertIn(f"| {count} |", (output / "report.md").read_text())
+            with (output / "summary.csv").open() as handle:
+                self.assertEqual([int(row["iterations_per_client"]) for row in csv.DictReader(handle)],
+                                 [5000, 5000, 200000, 200000, 200, 200])
+
+    def test_profile_matrix_changes_only_the_broker_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "ubusd"
+            executable.write_bytes(b"broker")
+            observed = []
+
+            def cargo(args, environment, capture_stdout):
+                config = next(value for value in args if value.startswith("profile.release.package.ubusd.opt-level="))
+                level = str(json.loads(config.split("=", 1)[1]))
+                core_level = environment["CARGO_PROFILE_RELEASE_OPT_LEVEL"]
+                observed.append((level, core_level))
+                artifacts = [{"reason": "compiler-artifact", "target": {"name": name, "kind": [kind]},
+                              "executable": str(executable) if name == "ubusd" else None,
+                              "profile": {"opt_level": opt}}
+                             for name, kind, opt in [("ubusd", "bin", level), ("ubus", "lib", core_level)]]
+                return subprocess.CompletedProcess(args, 0, stdout="\n".join(map(json.dumps, artifacts)))
+
+            with patch.dict(os.environ, {"CARGO_PROFILE_RELEASE_OPT_LEVEL": "s"}), \
+                 patch.object(benchmark.processes, "run_cargo", side_effect=cargo):
+                arms, provenance = benchmark.build_profile_matrix(root / "matrix")
+            self.assertEqual(observed, [(level, "s") for level in ("z", "s", "2", "3")])
+            self.assertEqual(len(arms), 4)
+            for arm in provenance.values():
+                self.assertEqual(arm["dependency_artifact_profiles"]["ubus"]["opt_level"], "s")
 
     def test_broker_counter_units_and_invalid_measurements(self):
         stats = benchmark.summarize([self.sample()])
@@ -92,6 +158,7 @@ class BenchmarkTests(unittest.TestCase):
         result = {"metadata": {"commit": "current", "baseline_rust_source": {"commit": "previous"}},
                   "configuration": {"samples": 1, "iterations": 2, "brokers": brokers},
                   "comparisons": [{"workload": "echo", "clients": 4, "payload_bytes": 4096,
+                                   "iterations_per_client": 2,
                                    **{broker: stats for broker in brokers}}]}
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -136,7 +203,36 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(invocations[2][1]["UBUS_ZERO_UBUSD_RS"], str(paths["rust"]))
             result = reports.call_args.args[1]
             self.assertEqual(result["configuration"]["brokers"], ["upstream", "baseline", "rust"])
+            self.assertEqual(result["comparisons"][0]["iterations_per_client"], 2)
             self.assertEqual(result["metadata"]["baseline_rust_source"]["commit"], "previous")
+
+    def test_full_run_keeps_fast_scaling_cases_long_and_records_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "binary"
+            executable.write_bytes(b"binary")
+            args = SimpleNamespace(baseline_ref=None, iterations=5000, pipeline_iterations=200000,
+                                   scaling_iterations=200, samples=1, warmup=100,
+                                   smoke=False, output=root / "report")
+            cases = [(name, 1, 0) for name in ("ping", "ping-pipeline", "lookup-many", "lookup-prefix",
+                                              "acl-lookup", "event-fanout", "notify-fanout")]
+
+            def worker(invocation, environment):
+                count = int(invocation[3])
+                return {"operations": count, "elapsed_ns": 1_000_000_000, "iterations": count}
+
+            with patch.object(benchmark, "build", return_value=({"ubusd": executable, "ubus-bench": executable}, {})), \
+                 patch.object(benchmark, "metadata", return_value={"binaries": {}, "reference_shared_libraries": {}}), \
+                 patch.object(benchmark, "CASES", cases), \
+                 patch.object(benchmark, "run_worker", side_effect=worker), \
+                 patch.object(benchmark, "validate") as validate, \
+                 patch.object(benchmark, "summarize", return_value={"operations_per_second": 1}), \
+                 patch.object(benchmark, "write_reports") as reports:
+                benchmark.measure(args, executable, root)
+            counts = [5000, 200000, 200, 5000, 5000, 5000, 5000]
+            self.assertEqual([call.args[3] for call in validate.call_args_list],
+                             [count for count in counts for _ in range(2)])
+            self.assertEqual([case["iterations_per_client"] for case in reports.call_args.args[1]["comparisons"]], counts)
 
     @unittest.skipUnless(sys.platform == "linux", "Linux process sessions")
     def test_timeout_reaps_the_benchmark_worker(self):
