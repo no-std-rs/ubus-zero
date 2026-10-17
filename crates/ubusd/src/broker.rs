@@ -1080,6 +1080,29 @@ fn peek_descriptor_free_bytes(fd: &OwnedFd, bytes: &mut [u8]) -> Result<Option<u
     Ok((!ancillary).then_some(received.bytes))
 }
 
+/// Locate the partial frame without consuming it. Only descriptor-bearing
+/// reads and buffer growth need framing here; ordinary small batches go
+/// straight to the codec after the socket has been drained.
+fn rx_frame_window(peer: &Peer, frame_start: &mut usize) -> Option<(usize, bool)> {
+    loop {
+        let available = peer.rx_buf.len() - *frame_start;
+        if available < RX_FD_WINDOW {
+            return Some((RX_FD_WINDOW - available, true));
+        }
+        let prefix = &peer.rx_buf[*frame_start + 8..*frame_start + 12];
+        let raw_len = (u32::from_be_bytes(prefix.try_into().unwrap()) & 0x00ff_ffff) as usize;
+        if !(4..=ubus::wire::MAX_MSG_LEN).contains(&raw_len) {
+            return None;
+        }
+        let frame_len = ubus::wire::HEADER_SIZE + ubus::blob::align4(raw_len);
+        if available >= frame_len {
+            *frame_start += frame_len;
+            continue;
+        }
+        return Some((frame_len - available, false));
+    }
+}
+
 /// Read everything currently queued on `peer.fd` into `peer.rx_buf`.
 /// Returns `false` if the peer hung up — caller schedules a close.
 fn read_into_buf(peer: &mut Peer, peer_id: PeerId, scratch: &mut Vec<u8>) -> bool {
@@ -1094,31 +1117,17 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId, scratch: &mut Vec<u8>) -> boo
     };
     let mut frame_start = 0;
     loop {
-        // Track the partial frame even on the descriptor-free batching path.
-        // Reuse one bounded buffer across peers; large bodies then need far
-        // fewer peek/consume pairs, without a large allocation per connection.
-        let (remaining, header) = loop {
-            let available = peer.rx_buf.len() - frame_start;
-            if available < RX_FD_WINDOW {
-                break (RX_FD_WINDOW - available, true);
+        // Avoid a second framing walk for small traffic. Once a bufferful
+        // has accumulated, size the shared scratch for the declared frame.
+        if peer.rx_buf.len() >= scratch.len() && scratch.len() < 64 * 1024 {
+            let Some((remaining, _)) = rx_frame_window(peer, &mut frame_start) else {
+                return true; // The codec diagnoses the invalid frame.
+            };
+            let frame_len = peer.rx_buf.len() - frame_start + remaining;
+            let wanted = frame_len.min(64 * 1024).next_power_of_two();
+            if scratch.len() < wanted {
+                scratch.resize(wanted, 0);
             }
-            let prefix = &peer.rx_buf[frame_start + 8..frame_start + 12];
-            let raw_len = (u32::from_be_bytes(prefix.try_into().unwrap()) & 0x00ff_ffff) as usize;
-            if !(4..=ubus::wire::MAX_MSG_LEN).contains(&raw_len) {
-                // Leave invalid framing to the decoder, which closes the peer.
-                return true;
-            }
-            let frame_len = ubus::wire::HEADER_SIZE + ubus::blob::align4(raw_len);
-            if available >= frame_len {
-                frame_start += frame_len;
-                continue;
-            }
-            break (frame_len - available, false);
-        };
-        let frame_len = peer.rx_buf.len() - frame_start + remaining;
-        let wanted = frame_len.min(64 * 1024).next_power_of_two();
-        if scratch.len() < wanted {
-            scratch.resize(wanted, 0);
         }
         // This socket has a single reader. Bytes proven descriptor-free by
         // MSG_PEEK cannot change before consumption; appended fd-bearing
@@ -1141,6 +1150,9 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId, scratch: &mut Vec<u8>) -> boo
             // may return preceding plain bytes together with the fd. Once a
             // peek finds ancillary data, locate the partial frame and bound
             // every read to its header/body, matching upstream's fd window.
+            let Some((remaining, header)) = rx_frame_window(peer, &mut frame_start) else {
+                return true;
+            };
             let frame_abs = peer.rx_abs.saturating_add(frame_start);
             let capture_fd = header && !peer.rx_fds.iter().any(|(at, _)| *at == frame_abs);
             (remaining.min(scratch.len()), frame_abs, capture_fd)

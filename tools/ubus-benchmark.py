@@ -240,8 +240,8 @@ def main():
     if sys.platform != "linux":
         raise ValueError("broker benchmarks currently require Linux")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--iterations", type=int, default=1000)
-    parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--iterations", type=int, default=5000)
+    parser.add_argument("--samples", type=int, default=6)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--smoke", action="store_true", help="20 operations/client, two samples, five warmups")
     parser.add_argument("--baseline-ref", help="also build this Git commit/ref and compare its Rust broker using the current driver/toolchain")

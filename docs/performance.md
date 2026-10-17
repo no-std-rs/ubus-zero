@@ -108,7 +108,9 @@ hide broker differences; repeat surprising results before optimizing.
 
 The **Broker performance** workflow validates all workloads in a short PR
 smoke run. Main-branch changes, weekly runs and manual dispatches use the full
-defaults: 1,000 operations per client, five samples and 100 warm-up operations.
+defaults: 5,000 operations per client, six samples and 100 warm-up operations.
+Longer trials reduce the influence of thread and scheduler overhead. Six samples
+balance starting positions for both two-arm and three-arm comparisons.
 The job uploads the HTML, CSV, Markdown and raw JSON as `broker-performance`
 and adds its table to the Actions summary.
 Manual dispatch accepts an optional `baseline_ref` for a same-machine comparison
