@@ -16,6 +16,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import tomllib
 
@@ -24,7 +25,7 @@ SPEC = importlib.util.spec_from_file_location("benchmark_processes", ROOT / "too
 processes = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(processes)
 CASES = [
-    ("connect", 1, 0), ("ping", 1, 0), ("lookup", 1, 0),
+    ("connect", 1, 0), ("ping", 1, 0), ("ping-pipeline", 1, 0), ("lookup", 1, 0),
     ("echo", 1, 64), ("echo", 1, 4096), ("echo", 1, 32768), ("echo", 4, 4096),
 ]
 
@@ -36,6 +37,37 @@ def command(args, **kwargs):
 def digest(path):
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def identity(path):
+    return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest(path)}
+
+
+def build_baseline(reference, directory):
+    commit = command(["git", "rev-parse", "--verify", "--end-of-options", reference + "^{commit}"],
+                     stdout=subprocess.PIPE).stdout.strip()
+    with tempfile.TemporaryFile() as archive:
+        command(["git", "archive", "--format=tar", commit], stdout=archive)
+        archive.seek(0)
+        with tarfile.open(fileobj=archive) as source:
+            source.extractall(directory, filter="data")
+    fixtures = directory / ".dep/bin"
+    fixtures.parent.mkdir(parents=True, exist_ok=True)
+    fixtures.symlink_to(ROOT / ".dep/bin", target_is_directory=True)
+    result = processes.run_cargo(
+        ["cargo", "build", "--release", "--locked", "--manifest-path", str(directory / "Cargo.toml"),
+         "--target-dir", str(directory / "target"), "-p", "ubusd", "-p", "ubus-testkit", "--bins", "--message-format=json"],
+        os.environ.copy(), capture_stdout=True)
+    result.check_returncode()
+    for line in result.stdout.splitlines():
+        artifact = json.loads(line)
+        if (artifact.get("reason") == "compiler-artifact" and artifact.get("executable")
+                and artifact["target"]["name"] == "ubusd"):
+            return Path(artifact["executable"]).resolve(), {
+                "commit": commit, "cargo_artifact_profile": artifact["profile"],
+                "release_profile": tomllib.loads((directory / "Cargo.toml").read_text())["profile"]["release"],
+            }
+    raise ValueError("Cargo did not report the baseline broker executable")
 
 
 def build():
@@ -67,6 +99,8 @@ def validate(sample, broker, case, iterations, warmup):
     expected = {"schema_version": 1, "broker": broker, "workload": workload,
                 "clients": clients, "payload_bytes": payload_bytes,
                 "iterations": iterations, "warmup": warmup, "operations": iterations * clients}
+    if workload == "ping-pipeline":
+        expected["pipeline_depth"] = 32
     for key, value in expected.items():
         if type(sample.get(key)) is not type(value) or sample[key] != value:
             raise ValueError(f"invalid worker result: {key}")
@@ -94,6 +128,8 @@ def summarize(samples):
 
 def label(case):
     workload, clients, payload_bytes = case
+    if workload == "ping-pipeline":
+        workload = "ping (32 outstanding)"
     suffix = f" {payload_bytes} B" if payload_bytes else ""
     return f"{workload}{suffix}, {clients} client{'s' if clients != 1 else ''}"
 
@@ -110,9 +146,6 @@ def run_worker(invocation, environment, timeout=300):
 
 
 def metadata(binaries, profiles, upstream):
-    def identity(path):
-        return {"path": str(path), "bytes": path.stat().st_size, "sha256": digest(path)}
-
     cpu = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
                 if line.startswith("model name")), platform.machine())
     pins = {}
@@ -139,8 +172,10 @@ def metadata(binaries, profiles, upstream):
         "method": "Same Rust client/provider and child-local root-credential shim; direct Unix sockets; "
                   "no wire tap, I/O fault injection or ACL evaluation. Payload sizes count string "
                   "contents, excluding blobmsg/protocol overhead. Fresh broker per sample, warmed connections, "
-                  "alternating broker order. End-to-end operations include client/provider work and "
+                  "rotating broker order. End-to-end operations include client/provider work and "
                   "reply validation; connect includes socket connect, HELLO and close. "
+                  "Pipelined ping keeps up to 32 requests outstanding; each latency runs from its send "
+                  "through the validated DATA and STATUS replies, including queueing. "
                   "Throughput uses concurrent wall time including barrier/join overhead. "
                   "Percentiles pool all measured operations; throughput is the median sample rate.",
     }
@@ -148,9 +183,10 @@ def metadata(binaries, profiles, upstream):
 
 def write_reports(output, result):
     output.mkdir(parents=True, exist_ok=True)
+    brokers = result["configuration"].get("brokers", ["upstream", "rust"])
     rows = []
     for comparison in result["comparisons"]:
-        for broker in ("upstream", "rust"):
+        for broker in brokers:
             rows.append({"workload": comparison["workload"], "clients": comparison["clients"],
                          "payload_bytes": comparison["payload_bytes"], "broker": broker,
                          **comparison[broker]})
@@ -164,8 +200,8 @@ def write_reports(output, result):
     body = []
     for comparison in result["comparisons"]:
         name = label((comparison["workload"], comparison["clients"], comparison["payload_bytes"]))
-        maximum = max(comparison[broker]["operations_per_second"] for broker in ("upstream", "rust"))
-        for broker in ("upstream", "rust"):
+        maximum = max(comparison[broker]["operations_per_second"] for broker in brokers)
+        for broker in brokers:
             stats = comparison[broker]
             values = [f'{stats[key]:,.2f}' for key in ("operations_per_second", "p50_us", "p95_us", "p99_us")]
             table.append(f"| {name} | {broker} | " + " | ".join(values) + " |")
@@ -208,6 +244,7 @@ def main():
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--smoke", action="store_true", help="20 operations/client, two samples, five warmups")
+    parser.add_argument("--baseline-ref", help="also build this Git commit/ref and compare its Rust broker using the current driver/toolchain")
     parser.add_argument("--upstream", type=Path, default=ROOT / ".dep/bin/ubusd")
     parser.add_argument("--output", type=Path, default=ROOT / "dist/benchmarks")
     args = parser.parse_args()
@@ -218,29 +255,48 @@ def main():
     upstream = args.upstream.resolve()
     if not upstream.is_file():
         parser.error("build the pinned reference first: tools/ubusd-builder/build.sh")
+    with tempfile.TemporaryDirectory(prefix="ubus-benchmark-base-") as directory:
+        measure(args, upstream, Path(directory))
+
+
+def measure(args, upstream, baseline_directory):
     binaries, profiles = build()
+    brokers = {"upstream": upstream}
+    if args.baseline_ref:
+        baseline, baseline_source = build_baseline(args.baseline_ref, baseline_directory)
+        brokers["baseline"] = baseline
+    brokers["rust"] = binaries["ubusd"]
+    # Capture starting load and provenance after every compilation has finished.
     provenance = metadata(binaries, profiles, upstream)
+    if args.baseline_ref:
+        provenance["binaries"]["baseline"] = identity(baseline)
+        provenance["baseline_rust_source"] = baseline_source
     environment = {**os.environ, "UBUS_ZERO_UBUSD": str(upstream), "UBUS_ZERO_UBUSD_RS": str(binaries["ubusd"])}
     comparisons = []
     for case_index, case in enumerate(CASES):
-        samples = {"upstream": [], "rust": []}
+        samples = {broker: [] for broker in brokers}
         workload, clients, payload_bytes = case
         for repeat in range(args.samples):
-            order = ("upstream", "rust") if (repeat + case_index) % 2 == 0 else ("rust", "upstream")
+            order = list(brokers)
+            offset = (repeat + case_index) % len(order)
+            order = order[offset:] + order[:offset]
             for broker in order:
                 print(f"{label(case)}: {broker}, sample {repeat + 1}/{args.samples}", file=sys.stderr, flush=True)
-                invocation = [str(binaries["ubus-bench"]), broker, workload, str(args.iterations),
+                worker_broker = "upstream" if broker == "upstream" else "rust"
+                environment["UBUS_ZERO_UBUSD_RS"] = str(brokers[broker])
+                invocation = [str(binaries["ubus-bench"]), worker_broker, workload, str(args.iterations),
                               str(args.warmup), str(clients), str(payload_bytes)]
                 sample = run_worker(invocation, environment)
-                validate(sample, broker, case, args.iterations, args.warmup)
+                validate(sample, worker_broker, case, args.iterations, args.warmup)
                 samples[broker].append(sample)
         comparisons.append({"workload": workload, "clients": clients, "payload_bytes": payload_bytes,
                             **{broker: summarize(arm) for broker, arm in samples.items()}, "samples": samples})
-    for identity in [*provenance["binaries"].values(), *provenance["reference_shared_libraries"].values()]:
-        if digest(Path(identity["path"])) != identity["sha256"]:
+    for measured_file in [*provenance["binaries"].values(), *provenance["reference_shared_libraries"].values()]:
+        if digest(Path(measured_file["path"])) != measured_file["sha256"]:
             raise ValueError("a measured executable or reference library changed during the run")
     result = {"schema_version": 1, "configuration": {"iterations": args.iterations, "samples": args.samples,
-              "warmup": args.warmup, "smoke": args.smoke}, "metadata": provenance, "comparisons": comparisons}
+              "warmup": args.warmup, "smoke": args.smoke, "brokers": list(brokers)},
+              "metadata": provenance, "comparisons": comparisons}
     write_reports(args.output, result)
     print(f"Reports: {args.output.resolve()}")
 

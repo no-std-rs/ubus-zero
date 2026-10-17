@@ -7,6 +7,11 @@ on:
     branches: [main]
     paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'Cargo.*', 'rust-toolchain.toml', '.github/workflows/performance.yml']
   workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Optional Git commit/ref for a before-and-after Rust comparison
+        type: string
+        required: false
   schedule:
     - cron: '0 7 * * 1'
 
@@ -26,6 +31,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Cache pinned reference build
         id: reference-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -45,9 +51,12 @@ jobs:
       - name: Measure and verify both brokers
         env:
           BENCHMARK_EVENT: ${{ github.event_name }}
+          BENCHMARK_BASE_REF: ${{ inputs.baseline_ref }}
         run: |
           if [ "$BENCHMARK_EVENT" = pull_request ]; then
             python3 tools/ubus-benchmark.py --smoke
+          elif [ -n "$BENCHMARK_BASE_REF" ]; then
+            python3 tools/ubus-benchmark.py --baseline-ref "$BENCHMARK_BASE_REF"
           else
             python3 tools/ubus-benchmark.py
           fi

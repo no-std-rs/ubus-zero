@@ -1,5 +1,6 @@
 //! One verified, untapped benchmark sample. Orchestrated by tools/ubus-benchmark.py.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread::{self, JoinHandle};
@@ -8,13 +9,16 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use ubus::blobmsg::{lookup, BlobMsgTable};
 use ubus::client::UbusClient;
+use ubus::envelope::{EnvBuilder, UbusAttr};
 use ubus::server::{DispatchOutcome, UbusConnection, UbusObject};
+use ubus::wire::{Frame, MsgType};
 use ubus::{Transport, UbusError};
 use ubus_testkit::{UbusdHarness, UnixUbusTransport};
 
 type Client = UbusClient<UnixUbusTransport>;
 type Result<T> = std::result::Result<T, String>;
 const OBJECT: &str = "benchmark.echo";
+const PIPELINE_DEPTH: usize = 32;
 
 struct Config {
     broker: String,
@@ -28,7 +32,7 @@ struct Config {
 impl Config {
     fn parse(args: &[String]) -> Result<Self> {
         if args.len() != 6 {
-            return Err("usage: ubus-bench <upstream|rust> <connect|ping|lookup|echo> <iterations> <warmup> <clients> <payload-bytes>".into());
+            return Err("usage: ubus-bench <upstream|rust> <connect|ping|ping-pipeline|lookup|echo> <iterations> <warmup> <clients> <payload-bytes>".into());
         }
         let number = |index: usize, min, max| -> Result<usize> {
             let value = args[index].parse::<usize>().map_err(|e| e.to_string())?;
@@ -38,7 +42,10 @@ impl Config {
             Ok(value)
         };
         if !matches!(args[0].as_str(), "upstream" | "rust")
-            || !matches!(args[1].as_str(), "connect" | "ping" | "lookup" | "echo")
+            || !matches!(
+                args[1].as_str(),
+                "connect" | "ping" | "ping-pipeline" | "lookup" | "echo"
+            )
         {
             return Err("unknown broker or workload".into());
         }
@@ -139,6 +146,50 @@ struct Worker {
 }
 
 impl Worker {
+    fn pipeline(&mut self, count: usize) -> Result<Vec<u64>> {
+        let transport = self
+            .client
+            .as_mut()
+            .expect("persistent client")
+            .transport_mut();
+        let empty = EnvBuilder::new().finish();
+        let mut success = EnvBuilder::new();
+        success.push_u32(UbusAttr::Status, 0);
+        let success = success.finish();
+        let mut pending: VecDeque<(u16, Instant, bool)> = VecDeque::with_capacity(PIPELINE_DEPTH);
+        let mut latencies = Vec::with_capacity(count);
+        let mut sent = 0;
+        while latencies.len() < count {
+            while sent < count && pending.len() < PIPELINE_DEPTH {
+                let sequence = (sent as u16).wrapping_add(1);
+                let frame = Frame::to_broker(MsgType::Ping, sequence, empty.clone());
+                let start = Instant::now();
+                transport.send(&frame).map_err(|e| e.to_string())?;
+                pending.push_back((sequence, start, false));
+                sent += 1;
+            }
+            let frame = loop {
+                match transport.recv().map_err(|e| e.to_string())? {
+                    Some(frame) => break frame,
+                    None => transport.wait_recv(),
+                }
+            };
+            let (sequence, start, saw_data) = pending.front_mut().expect("outstanding ping");
+            if frame.hdr.seq != *sequence || frame.hdr.peer != 0 {
+                return Err("pipelined ping reply sequence/address mismatch".into());
+            }
+            match frame.hdr.ty {
+                MsgType::Data if !*saw_data && frame.payload == empty => *saw_data = true,
+                MsgType::Status if *saw_data && frame.payload == success => {
+                    latencies.push(start.elapsed().as_nanos() as u64);
+                    pending.pop_front();
+                }
+                _ => return Err("pipelined ping expected DATA followed by STATUS(0)".into()),
+            }
+        }
+        Ok(latencies)
+    }
+
     fn operation(&mut self, path: &str, workload: &str, sequence: i32) -> Result<()> {
         match workload {
             "connect" => {
@@ -231,14 +282,28 @@ fn run(config: &Config) -> Result<serde_json::Value> {
         } else {
             0
         };
+        if config.workload == "ping-pipeline" {
+            // The client sends HELLO while the broker also sends one on
+            // accept. A normal request drains the redundant HELLO's status
+            // before the pipeline starts reading the transport directly.
+            client
+                .as_mut()
+                .expect("persistent client")
+                .ping()
+                .map_err(|e| e.to_string())?;
+        }
         let mut worker = Worker {
             client,
             object,
             identity: identity as i32,
             payload: "x".repeat(config.payload_bytes),
         };
-        for sequence in 0..config.warmup {
-            worker.operation(&path, &config.workload, sequence as i32)?;
+        if config.workload == "ping-pipeline" {
+            worker.pipeline(config.warmup)?;
+        } else {
+            for sequence in 0..config.warmup {
+                worker.operation(&path, &config.workload, sequence as i32)?;
+            }
         }
         workers.push(worker);
     }
@@ -250,6 +315,9 @@ fn run(config: &Config) -> Result<serde_json::Value> {
             threads.push(scope.spawn(move || -> Result<Vec<u64>> {
                 let mut latencies = Vec::with_capacity(config.iterations);
                 gate.wait();
+                if config.workload == "ping-pipeline" {
+                    return worker.pipeline(config.iterations);
+                }
                 for sequence in config.warmup..config.warmup + config.iterations {
                     let start = Instant::now();
                     worker.operation(path, &config.workload, sequence as i32)?;
@@ -274,6 +342,7 @@ fn run(config: &Config) -> Result<serde_json::Value> {
         "clients": config.clients, "payload_bytes": config.payload_bytes,
         "iterations": config.iterations, "warmup": config.warmup,
         "operations": latencies.len(), "elapsed_ns": elapsed_ns, "latency_ns": latencies,
+        "pipeline_depth": if config.workload == "ping-pipeline" { PIPELINE_DEPTH } else { 1 },
     }))
 }
 
