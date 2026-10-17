@@ -200,12 +200,15 @@ fn run(config: &Config) -> Result<serde_json::Value> {
             return Err("unset fault injection, LD_PRELOAD and UBUS_TESTKIT_* overrides before benchmarking".into());
         }
     }
-    let broker = match config.broker.as_str() {
-        "upstream" => UbusdHarness::start_upstream(),
-        _ => UbusdHarness::start_rust(),
-    }
-    .map_err(|e| e.to_string())?
-    .ok_or("benchmark broker binary missing")?;
+    let (variable, socket_flag) = if config.broker == "upstream" {
+        ("UBUS_ZERO_UBUSD", "-s")
+    } else {
+        ("UBUS_ZERO_UBUSD_RS", "--socket")
+    };
+    let binary =
+        std::env::var_os(variable).ok_or("use tools/ubus-benchmark.py to select exact binaries")?;
+    let broker = UbusdHarness::start_binary(std::path::Path::new(&binary), socket_flag)
+        .map_err(|e| e.to_string())?;
     let path = broker.socket_path().to_string_lossy().into_owned();
     let provider = if matches!(config.workload.as_str(), "lookup" | "echo") {
         Some(Provider::start(path.clone())?)

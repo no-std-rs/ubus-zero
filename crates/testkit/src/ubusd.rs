@@ -23,6 +23,21 @@ pub struct UbusdHarness {
 }
 
 impl UbusdHarness {
+    /// Start this exact executable, without the compatibility suite's discovery
+    /// fallbacks. Benchmarks use this to avoid measuring a stale/debug broker.
+    /// `socket_flag` is `-s` for OpenWrt or `--socket` for the Rust broker.
+    pub fn start_binary(binary: &std::path::Path, socket_flag: &str) -> io::Result<Self> {
+        Self::spawn(
+            binary.as_os_str(),
+            &[socket_flag],
+            &[],
+            &uid_spoof_shims(),
+            &[],
+            None,
+        )?
+        .ok_or_else(|| io::Error::other("explicit broker executable is not viable"))
+    }
+
     /// Try to spawn upstream `ubusd -s <unique-path>`. `Ok(None)` when
     /// no binary is found; every other failure is `Err`. Probes the
     /// socket for up to ~5 s before returning.
@@ -609,6 +624,13 @@ mod tests {
     use std::collections::HashSet;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn explicit_missing_binary_never_falls_back_to_another_broker() {
+        let missing = unique_socket_path("missing_benchmark_binary");
+        assert!(!missing.exists());
+        assert!(UbusdHarness::start_binary(&missing, "--socket").is_err());
+    }
 
     #[test]
     fn fault_profile_parses_rx_eintr_every() {

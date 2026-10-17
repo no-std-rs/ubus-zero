@@ -130,13 +130,15 @@ def metadata(binaries, profiles, upstream):
         "rust_release_profile": tomllib.loads((ROOT / "Cargo.toml").read_text())["profile"]["release"],
         "cargo_artifact_profiles": profiles,
         "reference_recipe_pins": pins,
+        "reference_build_profile": "CMake Release in the checked-in builder; custom binaries may differ",
         "reference_recipe_sha256": digest(ROOT / "tools/ubusd-builder/Dockerfile"),
         "binaries": {"upstream": identity(upstream), "rust": identity(binaries["ubusd"]),
                      "driver": identity(binaries["ubus-bench"])},
         "reference_shared_libraries": {path.name: identity(path) for path in sorted(upstream.parent.glob("*.so*"))
                                        if path.is_file()},
         "method": "Same Rust client/provider and child-local root-credential shim; direct Unix sockets; "
-                  "no wire tap or I/O fault injection. Fresh broker per sample, warmed connections, "
+                  "no wire tap, I/O fault injection or ACL evaluation. Payload sizes count string "
+                  "contents, excluding blobmsg/protocol overhead. Fresh broker per sample, warmed connections, "
                   "alternating broker order. End-to-end operations include client/provider work and "
                   "reply validation; connect includes socket connect, HELLO and close. "
                   "Throughput uses concurrent wall time including barrier/join overhead. "
@@ -234,6 +236,9 @@ def main():
                 samples[broker].append(sample)
         comparisons.append({"workload": workload, "clients": clients, "payload_bytes": payload_bytes,
                             **{broker: summarize(arm) for broker, arm in samples.items()}, "samples": samples})
+    for identity in [*provenance["binaries"].values(), *provenance["reference_shared_libraries"].values()]:
+        if digest(Path(identity["path"])) != identity["sha256"]:
+            raise ValueError("a measured executable or reference library changed during the run")
     result = {"schema_version": 1, "configuration": {"iterations": args.iterations, "samples": args.samples,
               "warmup": args.warmup, "smoke": args.smoke}, "metadata": provenance, "comparisons": comparisons}
     write_reports(args.output, result)
