@@ -15,6 +15,7 @@ path = "src/lib.rs"
 ubus   = { package = "ubus-zero", path = "../.." }
 rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "fs", "pipe", "process", "time", "event"] }
 paste = "1"
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 # `libubox-sys` is Linux-only (libubox/libubus only build on Linux)
 # and silent-skips inside its own build.rs when `.dep/bin/` artifacts

@@ -1,0 +1,61 @@
+name: Broker performance
+
+on:
+  pull_request:
+    paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'scripts/benchmark_test.py', 'Cargo.*', '.github/workflows/performance.yml']
+  push:
+    branches: [main]
+    paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'Cargo.*', '.github/workflows/performance.yml']
+  workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  comparison:
+    name: Verified broker benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache pinned reference build
+        id: reference-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .dep/bin
+          key: openwrt-${{ runner.os }}-${{ hashFiles('tools/ubusd-builder/Dockerfile') }}
+      - name: Set up Docker Buildx
+        if: steps.reference-cache.outputs.cache-hit != 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build pinned OpenWrt fixtures
+        if: steps.reference-cache.outputs.cache-hit != 'true'
+        run: tools/ubusd-builder/build.sh
+      - name: Restore reference executable bits
+        run: chmod +x .dep/bin/ubusd
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Measure and verify both brokers
+        env:
+          BENCHMARK_EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$BENCHMARK_EVENT" = pull_request ]; then
+            python3 tools/ubus-benchmark.py --smoke
+          else
+            python3 tools/ubus-benchmark.py
+          fi
+          cat dist/benchmarks/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload comparison and raw samples
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: broker-performance
+          path: dist/benchmarks/
+          if-no-files-found: error
+          retention-days: 30
