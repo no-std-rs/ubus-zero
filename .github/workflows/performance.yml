@@ -2,10 +2,10 @@ name: Broker performance
 
 on:
   pull_request:
-    paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'scripts/benchmark_test.py', 'Cargo.*', '.github/workflows/performance.yml']
+    paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'scripts/benchmark_test.py', 'Cargo.*', 'rust-toolchain.toml', '.github/workflows/performance.yml']
   push:
     branches: [main]
-    paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'Cargo.*', '.github/workflows/performance.yml']
+    paths: ['src/**', 'crates/**', 'tools/ubus-benchmark.py', 'tools/ubus-compat-check.py', 'tools/ubusd-builder/**', 'Cargo.*', 'rust-toolchain.toml', '.github/workflows/performance.yml']
   workflow_dispatch:
   schedule:
     - cron: '0 7 * * 1'
