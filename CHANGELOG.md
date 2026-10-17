@@ -42,6 +42,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Verify relay descriptor closure with per-pipe EOF instead of process-wide FD
+  counts that race parallel tests.
+- Reset the request idle budget on accepted DATA so long object listings do
+  not time out while progressing; silence and unrelated traffic remain bounded.
 - Bound named-object history to live registrations and preserve last-valid
   duplicate protocol attributes like the pinned OpenWrt parser.
 - Use Linux epoll for active-peer dispatch and optimize the host daemon at

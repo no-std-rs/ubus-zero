@@ -88,7 +88,8 @@ changes hidden by that shared work. Fanout operations include draining and
 verifying all 50 deliveries; they count as one operation, not 50 operations.
 
 Each trial starts a fresh broker. Registration, connections and warmup finish
-before timing. Connect includes its own handshake and close. Pipeline warmup
+before timing. Streaming DATA resets the client idle budget, while silent or
+unrelated traffic still times out. Connect includes its own handshake and close. Pipeline warmup
 fully drains before timing; an untimed ping first drains the normal client's
 redundant HELLO status before direct transport reads. Per-request pipeline
 latency runs from send through both validated replies, including queueing.
