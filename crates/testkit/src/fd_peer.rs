@@ -439,6 +439,23 @@ mod tests {
             error.kind(),
             io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
         ));
+        // Reset-related disposal can become visible after recvmsg returns.
+        // Wait for pipe readiness, then require actual EOF below. A leaked
+        // writer still times out rather than being accepted as closed.
+        let mut ready = [rustix::event::PollFd::new(
+            &read_end,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            rustix::event::poll(&mut ready, Some(&timeout))
+                .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?,
+            1,
+            "retained descriptor did not close after socket reset"
+        );
         rustix::fs::fcntl_setfl(&read_end, rustix::fs::OFlags::NONBLOCK)
             .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
         let mut marker = [0];
