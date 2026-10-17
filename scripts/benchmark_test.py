@@ -20,7 +20,8 @@ class BenchmarkTests(unittest.TestCase):
     def sample(self):
         return {"schema_version": 1, "broker": "rust", "workload": "echo", "clients": 4,
                 "payload_bytes": 4096, "iterations": 2, "warmup": 1, "operations": 8,
-                "elapsed_ns": 1_000_000_000, "latency_ns": [500_000_000] * 8}
+                "elapsed_ns": 1_000_000_000, "latency_ns": [500_000_000] * 8,
+                "broker_cpu_ns": 800_000, "broker_rss_bytes": 1024, "broker_lifetime_peak_rss_bytes": 2048}
 
     def test_concurrent_throughput_uses_wall_time_instead_of_summed_latencies(self):
         sample = self.sample()
@@ -60,6 +61,22 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(json.loads((output / "performance.json").read_text()), result)
             self.assertEqual(len((output / "summary.csv").read_text().splitlines()), 3)
 
+    def test_broker_counter_units_and_invalid_measurements(self):
+        stats = benchmark.summarize([self.sample()])
+        self.assertEqual(stats["broker_cpu_us_per_operation"], 100)
+        self.assertEqual(stats["broker_rss_kib"], 1)
+        self.assertEqual(stats["broker_lifetime_peak_rss_kib"], 2)
+        for change in ({"broker_cpu_ns": -1}, {"broker_cpu_ns": True},
+                       {"broker_rss_bytes": None}, {"broker_lifetime_peak_rss_bytes": 1}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                benchmark.validate({**self.sample(), **change}, "rust", ("echo", 4, 4096), 2, 1)
+
+    def test_paired_bootstrap_retains_a_constant_trial_ratio(self):
+        self.assertEqual(benchmark.bootstrap_ratio([2, 200, 20], [1, 100, 10]), (2, 2))
+        self.assertEqual(benchmark.bootstrap_ratio([2], [1]), (None, None))
+        with self.assertRaises(ValueError):
+            benchmark.bootstrap_ratio([1, 2], [1])
+
     def test_pipeline_depth_is_part_of_the_measurement_contract(self):
         sample = {**self.sample(), "workload": "ping-pipeline", "payload_bytes": 0,
                   "pipeline_depth": 32}
@@ -97,7 +114,8 @@ class BenchmarkTests(unittest.TestCase):
                 invocations.append((args[:], env.copy()))
                 return {"schema_version": 1, "broker": args[1], "workload": "ping", "clients": 1,
                         "payload_bytes": 0, "iterations": 2, "warmup": 0, "operations": 2,
-                        "elapsed_ns": 10, "latency_ns": [2, 3]}
+                        "elapsed_ns": 10, "latency_ns": [2, 3], "broker_cpu_ns": 2,
+                        "broker_rss_bytes": 1024, "broker_lifetime_peak_rss_bytes": 2048}
 
             provenance = {"binaries": {name: benchmark.identity(paths[name])
                                       for name in ("upstream", "rust", "driver")},
