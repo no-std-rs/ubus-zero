@@ -43,6 +43,10 @@ independent of the C `libubus` API and remains pre-1.0. See
 [Compatibility testing](https://github.com/no-std-rs/ubus-zero/blob/main/docs/compatibility.md)
 for the full contract and test procedures.
 
+[Performance comparisons](https://github.com/no-std-rs/ubus-zero/blob/main/docs/performance.md)
+measure verified workloads against both brokers, with latency percentiles,
+throughput and raw samples.
+
 ## Library
 
 The Cargo package is `ubus-zero`; the library crate is `ubus`.
