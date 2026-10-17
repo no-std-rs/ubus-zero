@@ -313,6 +313,7 @@ dependencies = [
  "libubox-sys",
  "paste",
  "rustix",
+ "serde_json",
  "ubus-zero",
 ]
 

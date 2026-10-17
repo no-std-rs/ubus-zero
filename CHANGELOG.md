@@ -22,6 +22,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Reproducible Rust/OpenWrt broker benchmarks with verified protocol workloads,
+  latency percentiles, throughput, raw samples and standalone comparison reports.
+
 - Public ESP32-C3 factory firmware builds, Runnerless artifact publication, and
   a GitHub Pages USB flasher with browser-local configuration and checksums.
 - A `no_std` ESP32-C3 round-display example for live OpenWrt statistics over
