@@ -7,7 +7,7 @@ time, memory use, or OpenWrt router hardware.
 
 ## Run
 
-On Linux, with the pinned Rust toolchain, a C compiler, and Docker Buildx:
+On Linux, with Python 3.12+, the pinned Rust toolchain, a C compiler, and Docker Buildx:
 
 ```sh
 tools/ubusd-builder/build.sh
@@ -27,10 +27,18 @@ external scripts, fonts or services.
 ```sh
 python3 tools/ubus-benchmark.py --iterations 5000 --samples 6 --warmup 250
 python3 tools/ubus-benchmark.py --smoke    # harness validation, not a performance result
+python3 tools/ubus-benchmark.py --baseline-ref origin/main  # C, baseline Rust, current Rust
 ```
 
 `--iterations` counts operations **per client per sample**. `--upstream`
 selects another reference executable; `--output` selects the report directory.
+
+`--baseline-ref` archives the resolved Git commit into a temporary directory
+and builds its broker before measuring. All three arms use the current Rust
+driver, toolchain and pinned C fixtures; sample order rotates among them.
+The report records the baseline commit, build profile and binary hash.
+The temporary checkout and binary are removed after the run. Fetch the desired
+ref first. A missing ref or failed baseline build is a failure, not a skip.
 
 ## Workloads
 
@@ -38,6 +46,7 @@ selects another reference executable; `--output` selects the report directory.
 | --- | ---: | --- |
 | Connect, HELLO, close | 1 | Valid nonzero broker-assigned identity |
 | Ping on a persistent connection | 1 | Successful ubus reply |
+| Pipelined ping, up to 32 outstanding requests | 1 | Exact DATA then STATUS(0), with matching sequence and address for every request |
 | Lookup of a registered object | 1 | Exact registered object ID |
 | Echo, 64 / 4,096 / 32,768-byte string | 1 | Exact returned blobmsg bytes, including client ID and per-request sequence |
 | Echo, 4,096-byte string | 4 | Independent identities and sequences; every reply verified |
@@ -51,8 +60,18 @@ four clients, so its scheduling can also limit throughput.
 Each sample gets a fresh broker. Registration, connection setup and warm-up
 finish before measurement. Connect is the exception: opening the socket,
 validating HELLO and closing the connection are the operation being measured.
-Each client issues one request at a time; this is a closed-loop workload,
-not a measurement of latency under an independently fixed arrival rate.
+Each client issues one request at a time, except pipelined ping, which keeps
+up to 32 requests outstanding. Its per-request latency starts at send and ends
+after both replies are validated, including time queued behind earlier
+requests. Warm-up requests drain before measurement. These are closed-loop
+workloads, not latency under an independently fixed arrival rate.
+Pipelined setup also completes an untimed ping to drain the normal client's
+redundant HELLO status before reading replies directly from its transport.
+
+The broker shares one receive scratch buffer across peers. It starts at 4 KiB
+and grows for declared frame bodies up to 64 KiB, retained for later reads.
+This trades at most 64 KiB of broker heap for fewer receive syscalls on large
+messages while preserving descriptor-free batching and header-only FD capture.
 
 ## Interpret the report
 
@@ -64,7 +83,7 @@ not a measurement of latency under an independently fixed arrival rate.
   Wall time includes the start barrier, thread joins and connection cleanup.
 - Latency includes client serialization, transport, broker routing, provider
   execution, reply parsing and validation. It is not broker processing time.
-- Broker order alternates across samples and workloads. Both use direct
+- Broker order rotates across samples and workloads. All arms use direct
   sockets and the compatibility harness's same child-local root-credential
   shim. This permits named registration without host ACL changes; it does
   not benchmark ACL evaluation. Wire taps and I/O faults are excluded.
@@ -89,9 +108,13 @@ hide broker differences; repeat surprising results before optimizing.
 
 The **Broker performance** workflow validates all workloads in a short PR
 smoke run. Main-branch changes, weekly runs and manual dispatches use the full
-defaults: 1,000 operations per client, five samples and 100 warm-up operations.
+defaults: 5,000 operations per client, six samples and 100 warm-up operations.
+Longer trials reduce the influence of thread and scheduler overhead. Six samples
+balance starting positions for both two-arm and three-arm comparisons.
 The job uploads the HTML, CSV, Markdown and raw JSON as `broker-performance`
 and adds its table to the Actions summary.
+Manual dispatch accepts an optional `baseline_ref` for a same-machine comparison
+of C, baseline Rust and current Rust.
 
 Wrong replies, missing fixtures and broken runs fail CI. Latency and
 throughput have no pass/fail thresholds. The existing strict compatibility

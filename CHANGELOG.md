@@ -22,6 +22,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- A verified 32-request pipelined ping benchmark to cover broker batching, and
+  same-machine comparisons of C, baseline Rust and current Rust using a Git ref.
 - Reproducible Rust/OpenWrt broker benchmarks with verified protocol workloads,
   latency percentiles, throughput, raw samples and standalone comparison reports.
 
@@ -38,6 +40,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Reduce large-message broker receive syscalls with a shared adaptive buffer,
+  while preserving batching and descriptor boundaries.
 - Preserve ubus frame and descriptor boundaries across fragmented and pipelined
   socket reads, including disposal of descriptors outside the header window.
 - Keep fragmented Unix client replies buffered until the outer blob header

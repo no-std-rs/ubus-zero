@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("benchmark", Path(__file__).resolve().parents[1] / "tools/ubus-benchmark.py")
@@ -58,6 +59,66 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("not a timing gate", report)
             self.assertEqual(json.loads((output / "performance.json").read_text()), result)
             self.assertEqual(len((output / "summary.csv").read_text().splitlines()), 3)
+
+    def test_pipeline_depth_is_part_of_the_measurement_contract(self):
+        sample = {**self.sample(), "workload": "ping-pipeline", "payload_bytes": 0,
+                  "pipeline_depth": 32}
+        benchmark.validate(sample, "rust", ("ping-pipeline", 4, 0), 2, 1)
+        for depth in (None, 1, 31, 32.0):
+            with self.subTest(depth=depth), self.assertRaises(ValueError):
+                benchmark.validate({**sample, "pipeline_depth": depth}, "rust",
+                                   ("ping-pipeline", 4, 0), 2, 1)
+
+    def test_before_after_reports_preserve_all_three_arms(self):
+        stats = benchmark.summarize([self.sample()])
+        brokers = ["upstream", "baseline", "rust"]
+        result = {"metadata": {"commit": "current", "baseline_rust_source": {"commit": "previous"}},
+                  "configuration": {"samples": 1, "iterations": 2, "brokers": brokers},
+                  "comparisons": [{"workload": "echo", "clients": 4, "payload_bytes": 4096,
+                                   **{broker: stats for broker in brokers}}]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            benchmark.write_reports(output, result)
+            report = (output / "report.html").read_text()
+            for broker in brokers:
+                self.assertIn(f"<td>{broker}</td>", report)
+            self.assertEqual(len((output / "summary.csv").read_text().splitlines()), 4)
+            self.assertEqual(json.loads((output / "performance.json").read_text()), result)
+
+    def test_baseline_arm_uses_its_exact_binary_with_the_same_driver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {name: root / name for name in ("upstream", "rust", "baseline", "driver")}
+            for name, path in paths.items():
+                path.write_text(name)
+            invocations = []
+
+            def worker(args, env):
+                invocations.append((args[:], env.copy()))
+                return {"schema_version": 1, "broker": args[1], "workload": "ping", "clients": 1,
+                        "payload_bytes": 0, "iterations": 2, "warmup": 0, "operations": 2,
+                        "elapsed_ns": 10, "latency_ns": [2, 3]}
+
+            provenance = {"binaries": {name: benchmark.identity(paths[name])
+                                      for name in ("upstream", "rust", "driver")},
+                          "reference_shared_libraries": {}}
+            args = SimpleNamespace(baseline_ref="previous", iterations=2, samples=1,
+                                   warmup=0, smoke=True, output=root / "report")
+            with patch.object(benchmark, "build", return_value=(
+                    {"ubusd": paths["rust"], "ubus-bench": paths["driver"]}, {})), \
+                 patch.object(benchmark, "build_baseline", return_value=(paths["baseline"], {"commit": "previous"})), \
+                 patch.object(benchmark, "metadata", return_value=provenance), \
+                 patch.object(benchmark, "run_worker", side_effect=worker), \
+                 patch.object(benchmark, "CASES", [("ping", 1, 0)]), \
+                 patch.object(benchmark, "write_reports") as reports:
+                benchmark.measure(args, paths["upstream"], root)
+            self.assertEqual([call[0][0] for call in invocations], [str(paths["driver"])] * 3)
+            self.assertEqual([call[0][1] for call in invocations], ["upstream", "rust", "rust"])
+            self.assertEqual(invocations[1][1]["UBUS_ZERO_UBUSD_RS"], str(paths["baseline"]))
+            self.assertEqual(invocations[2][1]["UBUS_ZERO_UBUSD_RS"], str(paths["rust"]))
+            result = reports.call_args.args[1]
+            self.assertEqual(result["configuration"]["brokers"], ["upstream", "baseline", "rust"])
+            self.assertEqual(result["metadata"]["baseline_rust_source"]["commit"], "previous")
 
     @unittest.skipUnless(sys.platform == "linux", "Linux process sessions")
     def test_timeout_reaps_the_benchmark_worker(self):

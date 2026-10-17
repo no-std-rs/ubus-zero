@@ -171,6 +171,9 @@ pub struct Broker {
     /// tick so the steady-state allocation count is zero.
     live_ids_buf: Vec<PeerId>,
     peer_revents_buf: Vec<(PeerId, PollFlags)>,
+    /// Reused across peers. Grow only for a declared frame body, capped at
+    /// 64 KiB, so large messages do not require one syscall per 4 KiB.
+    rx_scratch: Vec<u8>,
 }
 
 impl Broker {
@@ -225,6 +228,7 @@ impl Broker {
             pending_close: HashSet::new(),
             live_ids_buf: Vec::new(),
             peer_revents_buf: Vec::new(),
+            rx_scratch: vec![0; 4096],
         };
         if acl_load.had_candidates {
             broker.broadcast_acl_sequence();
@@ -520,7 +524,7 @@ impl Broker {
         let mut frames: Vec<(Frame, Option<OwnedFd>)> = Vec::new();
         let mut close = false;
         if let Some(peer) = self.peers.get_mut(peer_id) {
-            close = !read_into_buf(peer, peer_id);
+            close = !read_into_buf(peer, peer_id, &mut self.rx_scratch);
             loop {
                 // A socket frame always has a four-byte outer blob header.
                 // The codec also supports standalone eight-byte headers for
@@ -1076,9 +1080,32 @@ fn peek_descriptor_free_bytes(fd: &OwnedFd, bytes: &mut [u8]) -> Result<Option<u
     Ok((!ancillary).then_some(received.bytes))
 }
 
+/// Locate the partial frame without consuming it. Only descriptor-bearing
+/// reads and buffer growth need framing here; ordinary small batches go
+/// straight to the codec after the socket has been drained.
+fn rx_frame_window(peer: &Peer, frame_start: &mut usize) -> Option<(usize, bool)> {
+    loop {
+        let available = peer.rx_buf.len() - *frame_start;
+        if available < RX_FD_WINDOW {
+            return Some((RX_FD_WINDOW - available, true));
+        }
+        let prefix = &peer.rx_buf[*frame_start + 8..*frame_start + 12];
+        let raw_len = (u32::from_be_bytes(prefix.try_into().unwrap()) & 0x00ff_ffff) as usize;
+        if !(4..=ubus::wire::MAX_MSG_LEN).contains(&raw_len) {
+            return None;
+        }
+        let frame_len = ubus::wire::HEADER_SIZE + ubus::blob::align4(raw_len);
+        if available >= frame_len {
+            *frame_start += frame_len;
+            continue;
+        }
+        return Some((frame_len - available, false));
+    }
+}
+
 /// Read everything currently queued on `peer.fd` into `peer.rx_buf`.
 /// Returns `false` if the peer hung up — caller schedules a close.
-fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
+fn read_into_buf(peer: &mut Peer, peer_id: PeerId, scratch: &mut Vec<u8>) -> bool {
     let fd = match peer.fd.as_ref() {
         Some(f) => f,
         None => {
@@ -1088,14 +1115,25 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
             return false;
         }
     };
-    let mut tmp = [0u8; 4096];
     let mut frame_start = 0;
     loop {
+        // Avoid a second framing walk for small traffic. Once a bufferful
+        // has accumulated, size the shared scratch for the declared frame.
+        if peer.rx_buf.len() >= scratch.len() && scratch.len() < 64 * 1024 {
+            let Some((remaining, _)) = rx_frame_window(peer, &mut frame_start) else {
+                return true; // The codec diagnoses the invalid frame.
+            };
+            let frame_len = peer.rx_buf.len() - frame_start + remaining;
+            let wanted = frame_len.min(64 * 1024).next_power_of_two();
+            if scratch.len() < wanted {
+                scratch.resize(wanted, 0);
+            }
+        }
         // This socket has a single reader. Bytes proven descriptor-free by
         // MSG_PEEK cannot change before consumption; appended fd-bearing
         // bytes remain queued beyond that exact prefix. Ordinary traffic can
         // therefore retain the original multi-frame batching behavior.
-        let batch = match peek_descriptor_free_bytes(fd, &mut tmp) {
+        let batch = match peek_descriptor_free_bytes(fd, scratch) {
             Ok(Some(0)) => return false,
             Ok(batch) => batch,
             Err(Errno::AGAIN) => return true,
@@ -1112,30 +1150,14 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
             // may return preceding plain bytes together with the fd. Once a
             // peek finds ancillary data, locate the partial frame and bound
             // every read to its header/body, matching upstream's fd window.
-            let (remaining, header) = loop {
-                let available = peer.rx_buf.len() - frame_start;
-                if available < RX_FD_WINDOW {
-                    break (RX_FD_WINDOW - available, true);
-                }
-                let prefix = &peer.rx_buf[frame_start + 8..frame_start + 12];
-                let raw_len =
-                    (u32::from_be_bytes(prefix.try_into().unwrap()) & 0x00ff_ffff) as usize;
-                if !(4..=ubus::wire::MAX_MSG_LEN).contains(&raw_len) {
-                    // Leave invalid framing to the decoder, which closes the peer.
-                    return true;
-                }
-                let frame_len = ubus::wire::HEADER_SIZE + ubus::blob::align4(raw_len);
-                if available >= frame_len {
-                    frame_start += frame_len;
-                    continue;
-                }
-                break (frame_len - available, false);
+            let Some((remaining, header)) = rx_frame_window(peer, &mut frame_start) else {
+                return true;
             };
             let frame_abs = peer.rx_abs.saturating_add(frame_start);
             let capture_fd = header && !peer.rx_fds.iter().any(|(at, _)| *at == frame_abs);
-            (remaining.min(tmp.len()), frame_abs, capture_fd)
+            (remaining.min(scratch.len()), frame_abs, capture_fd)
         };
-        let mut iov = [IoSliceMut::new(&mut tmp[..read_len])];
+        let mut iov = [IoSliceMut::new(&mut scratch[..read_len])];
         let mut control_storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
         // Upstream reads the body without an ancillary buffer, and disables
         // further fd reception once this frame already owns one. The kernel
@@ -1168,7 +1190,7 @@ fn read_into_buf(peer: &mut Peer, peer_id: PeerId) -> bool {
                     );
                     return false;
                 }
-                peer.rx_buf.extend_from_slice(&tmp[..received.bytes]);
+                peer.rx_buf.extend_from_slice(&scratch[..received.bytes]);
             }
             Err(Errno::AGAIN) => return true,
             Err(Errno::INTR) => continue,
@@ -1524,6 +1546,131 @@ mod tx_send_window_tests {
     #[test]
     fn no_marker_does_not_clamp() {
         assert_eq!(tx_send_window(100, 40, None), (40, false));
+    }
+}
+
+#[cfg(test)]
+mod rx_frame_tests {
+    use super::*;
+    use rustix::fs::{fcntl_setfl, OFlags};
+    use rustix::net::{socketpair, AddressFamily, SocketFlags, SocketType};
+    use ubus::envelope::{EnvBuilder, UbusAttr};
+    use ubus::wire::MsgType;
+    use ubus_testkit::pipe;
+
+    fn sockets() -> (OwnedFd, OwnedFd) {
+        socketpair(
+            AddressFamily::UNIX,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )
+        .expect("socketpair")
+    }
+
+    fn send_rights(socket: &OwnedFd, bytes: &[u8], descriptor: &OwnedFd, count: usize) {
+        let rights = vec![descriptor.as_fd(); count];
+        let mut storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(253))];
+        let mut control = SendAncillaryBuffer::new(&mut storage);
+        assert!(control.push(SendAncillaryMessage::ScmRights(&rights)));
+        assert_eq!(
+            rustix::net::sendmsg(
+                socket,
+                &[IoSlice::new(bytes)],
+                &mut control,
+                SendFlags::empty()
+            )
+            .expect("sendmsg"),
+            bytes.len()
+        );
+    }
+
+    fn assert_pipe_closed(read_end: &OwnedFd) {
+        let mut ready = [PollFd::new(read_end, PollFlags::IN)];
+        let timeout = Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        assert_eq!(poll(&mut ready, Some(&timeout)).expect("pipe readiness"), 1);
+        fcntl_setfl(read_end, OFlags::NONBLOCK).expect("nonblocking pipe");
+        assert_eq!(
+            rustix::io::read(read_end, &mut [0; 1]).expect("pipe EOF"),
+            0
+        );
+    }
+
+    #[test]
+    fn header_keeps_one_descriptor_and_closes_truncated_rights() {
+        for count in [1, 3, 253] {
+            let (sender, receiver) = sockets();
+            let (read_end, write_end) = pipe().expect("pipe");
+            let frame = Frame::to_broker(MsgType::Ping, 1, EnvBuilder::new().finish());
+            let bytes = Codec::write_frame(&frame);
+            send_rights(&sender, &bytes, &write_end, count);
+            drop(write_end);
+            let mut peer = Peer::new(receiver, Some(0), None, None);
+            assert!(read_into_buf(
+                &mut peer,
+                PeerId::new(1).unwrap(),
+                &mut vec![0; 4096]
+            ));
+            assert_eq!(peer.rx_buf, bytes);
+            assert_eq!(peer.rx_fds.len(), 1);
+            assert!(peer.take_rx_fd(0).is_some());
+            assert_pipe_closed(&read_end);
+        }
+    }
+
+    #[test]
+    fn fragmented_large_body_drops_its_fd_and_preserves_next_headers_fd() {
+        for body_has_fd in [false, true] {
+            let (sender, receiver) = sockets();
+            let mut env = EnvBuilder::new();
+            env.push_bytes_id(UbusAttr::Data as u8, &vec![0x5a; 32 * 1024]);
+            let first = Codec::write_frame(&Frame::to_broker(MsgType::Data, 1, env.finish()));
+            let second = Codec::write_frame(&Frame::to_broker(
+                MsgType::Ping,
+                2,
+                EnvBuilder::new().finish(),
+            ));
+            let mut peer = Peer::new(receiver, Some(0), None, None);
+            let mut scratch = vec![0; 4096];
+            let id = PeerId::new(1).unwrap();
+
+            assert_eq!(rustix::io::write(&sender, &first[..5]).unwrap(), 5);
+            assert!(read_into_buf(&mut peer, id, &mut scratch));
+            assert_eq!(peer.rx_buf, first[..5]);
+            assert_eq!(
+                rustix::io::write(&sender, &first[5..RX_FD_WINDOW]).unwrap(),
+                RX_FD_WINDOW - 5
+            );
+            assert!(read_into_buf(&mut peer, id, &mut scratch));
+
+            let (body_read, body_write) = pipe().expect("body pipe");
+            let (header_read, header_write) = pipe().expect("header pipe");
+            if body_has_fd {
+                send_rights(&sender, &first[RX_FD_WINDOW..], &body_write, 1);
+            } else {
+                assert_eq!(
+                    rustix::io::write(&sender, &first[RX_FD_WINDOW..]).unwrap(),
+                    first.len() - RX_FD_WINDOW
+                );
+            }
+            send_rights(&sender, &second, &header_write, 1);
+            drop(body_write);
+            drop(header_write);
+            assert!(read_into_buf(&mut peer, id, &mut scratch));
+            assert_eq!(peer.rx_buf, [first.as_slice(), second.as_slice()].concat());
+            assert!(peer.take_rx_fd(0).is_none());
+            assert_pipe_closed(&body_read);
+            fcntl_setfl(&header_read, OFlags::NONBLOCK).unwrap();
+            assert_eq!(
+                rustix::io::read(&header_read, &mut [0; 1]),
+                Err(Errno::AGAIN)
+            );
+            assert!(peer.take_rx_fd(first.len()).is_some());
+            assert_pipe_closed(&header_read);
+        }
     }
 }
 
