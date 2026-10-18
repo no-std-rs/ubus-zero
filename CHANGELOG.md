@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Performance
+
+- Share encoded NOTIFY templates across subscribers and stamp object IDs in
+  reusable transmit scratch, preserving independently owned queued output.
+
 ### Fixed
 
 - Preserve empty JSON object keys in the high-level codec, including nested
