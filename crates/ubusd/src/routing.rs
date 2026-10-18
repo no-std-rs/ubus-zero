@@ -53,15 +53,46 @@ pub enum Action {
         frame: Frame,
         fd: Option<OwnedFd>,
     },
-    /// Pre-encoded fan-out: the same on-wire bytes go to many peers
-    /// without each peer paying an independent frame clone + encode.
-    /// NOTIFY across N subscribers ends up as N of these sharing one
-    /// `Arc<[u8]>`, so the heap cost of the body is paid once.
-    SendBytes { peer_id: PeerId, bytes: Arc<[u8]> },
+    /// NOTIFY fan-out shares one encoded template. The broker stamps the
+    /// destination object into reusable scratch before sending; a queued
+    /// remainder retains its own bytes through the ordinary TX path.
+    SendNotify {
+        peer_id: PeerId,
+        template: Arc<NotifyTemplate>,
+        obj_id: ObjectId,
+    },
     /// Schedule a peer for close after the current poll iteration
     /// finishes draining. Deferred via `Broker::pending_close` so the
     /// in-flight dispatch loop iterates over a stable peer set.
     ClosePeer { peer_id: PeerId },
+}
+
+/// One encoded NOTIFY delivery shared by every subscriber action.
+#[derive(Debug)]
+pub struct NotifyTemplate {
+    bytes: Vec<u8>,
+    obj_id_offset: usize,
+}
+
+impl NotifyTemplate {
+    fn new(frame: &Frame) -> Self {
+        let attr = find(&frame.payload, UbusAttr::ObjId).expect("stamped invoke objid");
+        let obj_id_offset = ubus::wire::HEADER_SIZE + attr.payload.as_ptr() as usize
+            - frame.payload.as_ptr() as usize;
+        Self {
+            bytes: Codec::write_frame(frame),
+            obj_id_offset,
+        }
+    }
+
+    /// Replace `out` with the complete delivery for `obj_id`, reusing its
+    /// capacity. Neither the template nor another delivery is mutated.
+    pub fn write_into(&self, obj_id: ObjectId, out: &mut Vec<u8>) {
+        out.clear();
+        out.extend_from_slice(&self.bytes);
+        out[self.obj_id_offset..self.obj_id_offset + 4]
+            .copy_from_slice(&obj_id.get().to_be_bytes());
+    }
 }
 
 impl Action {
@@ -954,13 +985,13 @@ fn dispatch_notify(
         Some(_) => {}
     }
     let subscribers = subs.subscribers_of(obj_id);
-    let subscriber_obj_ids: Vec<ObjectId> = subscribers.iter().map(|sub| sub.obj_id).collect();
     let method = find(frame.payload, UbusAttr::Method).and_then(|a| a.as_str());
     let data = find(frame.payload, UbusAttr::Data).map(|a| a.payload);
     let no_reply = find(frame.payload, UbusAttr::NoReply).is_some_and(|attr| attr.as_bool_int8());
     let (user, group) = peer_names(peers, src_peer);
     let mut out = Vec::with_capacity(subscribers.len() + 1);
     if !no_reply {
+        let subscriber_obj_ids: Vec<ObjectId> = subscribers.iter().map(|sub| sub.obj_id).collect();
         out.push(Action::send(
             src_peer,
             reply::notify_ack(frame.hdr.seq, frame.hdr.peer, obj_id, &subscriber_obj_ids),
@@ -977,17 +1008,12 @@ fn dispatch_notify(
             data,
             no_reply,
         );
-        let attr = find(&template.payload, UbusAttr::ObjId).expect("stamped invoke objid");
-        let offset = ubus::wire::HEADER_SIZE + attr.payload.as_ptr() as usize
-            - template.payload.as_ptr() as usize;
-        let bytes = Codec::write_frame(&template);
+        let template = Arc::new(NotifyTemplate::new(&template));
         for subscriber in subscribers {
-            let mut encoded: Arc<[u8]> = Arc::from(bytes.as_slice());
-            Arc::get_mut(&mut encoded).expect("fresh fanout buffer")[offset..offset + 4]
-                .copy_from_slice(&subscriber.obj_id.get().to_be_bytes());
-            out.push(Action::SendBytes {
+            out.push(Action::SendNotify {
                 peer_id: subscriber.peer_id,
-                bytes: encoded,
+                template: Arc::clone(&template),
+                obj_id: subscriber.obj_id,
             });
         }
     }
@@ -1860,7 +1886,7 @@ mod tests {
         let dests: Vec<PeerId> = actions
             .iter()
             .filter_map(|a| match a {
-                Action::SendBytes { peer_id, .. } => Some(*peer_id),
+                Action::SendNotify { peer_id, .. } => Some(*peer_id),
                 _ => None,
             })
             .collect();
@@ -1869,9 +1895,23 @@ mod tests {
         assert!(dests.contains(&sub_b));
         assert!(!dests.contains(&bystander));
         assert!(!dests.contains(&owner));
+        let (Action::SendNotify { template: a, .. }, Action::SendNotify { template: b, .. }) =
+            (&actions[1], &actions[2])
+        else {
+            panic!("expected NOTIFY deliveries");
+        };
+        assert!(Arc::ptr_eq(a, b), "subscribers share one encoded template");
         for action in actions.into_iter().skip(1) {
             let (dest, bytes) = match action {
-                Action::SendBytes { peer_id, bytes } => (peer_id, bytes),
+                Action::SendNotify {
+                    peer_id,
+                    template,
+                    obj_id,
+                } => {
+                    let mut bytes = Vec::new();
+                    template.write_into(obj_id, &mut bytes);
+                    (peer_id, bytes)
+                }
                 other => panic!("unexpected action: {other:?}"),
             };
             let (forwarded, consumed) = Codec::read_frame(&bytes).expect("encoded fan-out");
@@ -1941,11 +1981,18 @@ mod tests {
 
         let actions = dispatch(&frame, owner, &mut peers, &mut objs, &mut subs);
         assert_eq!(actions.len(), 1, "NoReply must suppress the NOTIFY ack");
-        let Action::SendBytes { peer_id, bytes } = &actions[0] else {
+        let Action::SendNotify {
+            peer_id,
+            template,
+            obj_id,
+        } = &actions[0]
+        else {
             panic!("expected encoded fan-out");
         };
+        let mut bytes = Vec::new();
+        template.write_into(*obj_id, &mut bytes);
         assert_eq!(*peer_id, subscriber);
-        let (fanout, consumed) = Codec::read_frame(bytes).expect("encoded fan-out");
+        let (fanout, consumed) = Codec::read_frame(&bytes).expect("encoded fan-out");
         assert_eq!(consumed, bytes.len());
         assert_eq!(
             attr_ids(&fanout.payload),
@@ -1998,10 +2045,15 @@ mod tests {
         assert!(
             matches!(actions[0], Action::SendTo { ref frame, .. } if frame.hdr.ty == MsgType::Status)
         );
-        let Action::SendBytes { bytes, .. } = &actions[1] else {
+        let Action::SendNotify {
+            template, obj_id, ..
+        } = &actions[1]
+        else {
             panic!("expected encoded fan-out");
         };
-        let (fanout, consumed) = Codec::read_frame(bytes).expect("encoded fan-out");
+        let mut bytes = Vec::new();
+        template.write_into(*obj_id, &mut bytes);
+        let (fanout, consumed) = Codec::read_frame(&bytes).expect("encoded fan-out");
         assert_eq!(consumed, bytes.len());
         assert_eq!(
             attr_ids(&fanout.payload),
@@ -4221,10 +4273,17 @@ mod tests {
             .iter()
             .skip(1)
             .map(|action| {
-                let Action::SendBytes { peer_id, bytes } = action else {
+                let Action::SendNotify {
+                    peer_id,
+                    template,
+                    obj_id,
+                } = action
+                else {
                     panic!("expected encoded fan-out, got {action:?}");
                 };
-                let (forwarded, _) = Codec::read_frame(bytes).expect("encoded fan-out");
+                let mut bytes = Vec::new();
+                template.write_into(*obj_id, &mut bytes);
+                let (forwarded, _) = Codec::read_frame(&bytes).expect("encoded fan-out");
                 let obj = find(&forwarded.payload, UbusAttr::ObjId)
                     .and_then(|a| a.as_u32())
                     .expect("fan-out objid");
