@@ -394,6 +394,76 @@ fn upstream_cli_calls_the_shipped_shell_provider() {
 }
 
 #[test]
+fn encoded_oversize_handler_reply_keeps_the_provider_running() {
+    brokers("cli encoded reply limit", |socket| {
+        let program = r#"import json,sys; value=json.load(sys.stdin); print(json.dumps({"values":[0]*70000} if value.get("large") else value, separators=(",",":")))"#;
+        let provider = cli(
+            socket,
+            &[
+                "-n",
+                "3",
+                "serve",
+                "example.reply-limit",
+                "echo",
+                "--",
+                "python3",
+                "-c",
+                program,
+            ],
+        )
+        .spawn()
+        .unwrap();
+        success(socket, &["-t", "3", "wait_for", "example.reply-limit"]);
+        assert_eq!(
+            success(
+                socket,
+                &["call", "example.reply-limit", "echo", r#"{"value":1}"#]
+            ),
+            json!({"value":1})
+        );
+        // 140,012 bytes of JSON are within the stdout budget, but 70,000
+        // encoded integers exceed the complete DATA frame's wire limit.
+        let oversized = wait(
+            cli(
+                socket,
+                &[
+                    "-t",
+                    "3",
+                    "call",
+                    "example.reply-limit",
+                    "echo",
+                    r#"{"large":true}"#,
+                ],
+            )
+            .spawn()
+            .unwrap(),
+        );
+        assert_eq!(
+            oversized.status.code(),
+            Some(9),
+            "{}",
+            String::from_utf8_lossy(&oversized.stderr)
+        );
+        assert!(oversized.stdout.is_empty());
+        assert_eq!(
+            success(
+                socket,
+                &["call", "example.reply-limit", "echo", r#"{"value":2}"#]
+            ),
+            json!({"value":2})
+        );
+        let provider = wait(provider);
+        assert!(
+            provider.status.success(),
+            "{}",
+            String::from_utf8_lossy(&provider.stderr)
+        );
+        assert!(String::from_utf8_lossy(&provider.stderr)
+            .contains("handler reply exceeds maximum message length"));
+    });
+}
+
+#[test]
 fn real_rpcd_sessions_and_error_statuses() {
     brokers("cli rpcd", |socket| {
         let Some(rpcd) = RpcdHarness::start(std::path::Path::new(socket), &[]).unwrap() else {

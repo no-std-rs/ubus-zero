@@ -9,6 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Report oversized provider replies as handler errors before sending DATA,
+  preserving the registered service for subsequent calls.
 - Apply the shared envelope policy in typed messages, preserving valid
   Status, ObjId and Method attributes before invalid duplicates.
 - Remove retired-object subscriptions and event registrations when replacing
