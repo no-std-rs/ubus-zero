@@ -514,6 +514,18 @@ impl BlobMsgTable {
 /// wire and rendered when non-empty.
 #[cfg(feature = "alloc")]
 pub fn to_json(buf: &[u8], named: bool) -> String {
+    render_json(buf, named, false)
+}
+
+/// The high-level JSON codec must preserve keys its encoder accepts, even
+/// though libblobmsg_json's text formatter omits empty table keys.
+#[cfg(feature = "json")]
+pub(crate) fn to_json_preserving_empty_keys(buf: &[u8]) -> String {
+    render_json(buf, true, true)
+}
+
+#[cfg(feature = "alloc")]
+fn render_json(buf: &[u8], named: bool, preserve_empty_keys: bool) -> String {
     let mut s = String::new();
     if named {
         s.push('{');
@@ -526,7 +538,7 @@ pub fn to_json(buf: &[u8], named: bool) -> String {
             s.push(',');
         }
         first = false;
-        if let Some(n) = a.name {
+        if let Some(n) = a.name.or((named && preserve_empty_keys).then_some("")) {
             s.push('"');
             json_escape_into(&mut s, n);
             s.push_str("\":");
@@ -543,8 +555,8 @@ pub fn to_json(buf: &[u8], named: bool) -> String {
             Some(BlobValue::Int32(v)) => push_i64(&mut s, v as i64),
             Some(BlobValue::Int64(v)) => push_i64(&mut s, v),
             Some(BlobValue::Double(v)) => s.push_str(&fmt_double_g17(v)),
-            Some(BlobValue::Table(p)) => s.push_str(&to_json(p, true)),
-            Some(BlobValue::Array(p)) => s.push_str(&to_json(p, false)),
+            Some(BlobValue::Table(p)) => s.push_str(&render_json(p, true, preserve_empty_keys)),
+            Some(BlobValue::Array(p)) => s.push_str(&render_json(p, false, preserve_empty_keys)),
             _ => s.push_str("null"),
         }
     }
