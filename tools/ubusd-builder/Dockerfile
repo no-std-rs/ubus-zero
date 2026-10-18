@@ -48,6 +48,17 @@ RUN git clone https://git.openwrt.org/project/libubox.git libubox \
  && git clone https://git.openwrt.org/project/rpcd.git rpcd \
  && git -C rpcd checkout "$RPCD_REV"
 
+# ubus_send_msg already closes a transferred fd. The pinned client library
+# closes it again after completing a request, racing fd reuse in our process.
+COPY libubus-reply-fd.patch reply-fd-check.c /tmp/
+RUN if git -C /src/ubus apply --check /tmp/libubus-reply-fd.patch; then \
+        git -C /src/ubus apply /tmp/libubus-reply-fd.patch; \
+    elif git -C /src/ubus apply --reverse --check /tmp/libubus-reply-fd.patch; then \
+        echo 'libubus reply-fd correction already present'; \
+    else \
+        echo 'Review libubus reply-fd ownership for this revision' >&2; exit 1; \
+    fi
+
 # libubox first — ubus links it.
 WORKDIR /src/libubox/build
 RUN cmake \
@@ -70,6 +81,12 @@ RUN cmake \
         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
         .. \
  && make -j"$(nproc)" install
+
+RUN cc -Wall -Wextra -Werror -Wl,--export-dynamic \
+        -isystem /usr/local/include /tmp/reply-fd-check.c \
+        -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lubus -lubox \
+        -o /tmp/reply-fd-check \
+ && /tmp/reply-fd-check
 
 WORKDIR /src/uci/build
 RUN cmake \

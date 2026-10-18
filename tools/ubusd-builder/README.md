@@ -17,6 +17,15 @@ Building from source (rather than packaging a distro apk/deb, neither
 of which exists outside OpenWrt) keeps the test deterministic and lets
 us pin specific upstream revisions.
 
+The reference broker uses the pinned upstream source. The client library carries
+[`libubus-reply-fd.patch`](libubus-reply-fd.patch): `ubus_send_msg` already closes a
+transferred descriptor, so `ubus_complete_deferred_request` must not close it
+again. Without this correction, an in-process caller can receive the same fd
+number between those closes and lose its new descriptor. The build runs
+[`reply-fd-check.c`](reply-fd-check.c), which forces that reuse and checks both
+descriptor owners and the transferred SCM_RIGHTS payload. Unknown patch contexts
+fail the build for review; revisions already containing the correction pass.
+
 ## Build
 
 From the repo root:
@@ -62,8 +71,7 @@ arm64-host story.
 
 ## Pinning upstream revisions
 
-The Dockerfile takes `LIBUBOX_REV` and `UBUS_REV` build-args (default
-`master`). To pin to a known-good commit:
+The Dockerfile pins `LIBUBOX_REV` and `UBUS_REV`. To evaluate other revisions:
 
 ```sh
 docker buildx build \

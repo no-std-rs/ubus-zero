@@ -15,6 +15,11 @@ Revision bumps are deliberate changes. They require rebuilding the fixtures,
 recording the corpus serially, reviewing every golden diff, and running the
 strict suite.
 
+The libubus client fixture applies a documented [reply-fd ownership
+correction](../tools/ubusd-builder/libubus-reply-fd.patch) to prevent its terminal
+reply path from closing a transferred fd twice. The builder forces fd-number
+reuse in a regression probe. The reference `ubusd` broker source is unchanged.
+
 Unresolvable ACL identity names fail closed, following upstream's later
 `008655958eb46de8630eb30c7bb09c3530d07dac` correction. They never inherit UID or
 GID zero. The pinned C reference predates that fix; dedicated Rust regressions

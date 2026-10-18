@@ -231,6 +231,7 @@ def metadata(binaries, profiles, upstream):
         "reference_recipe_pins": pins,
         "reference_build_profile": "CMake Release in the checked-in builder; custom binaries may differ",
         "reference_recipe_sha256": digest(ROOT / "tools/ubusd-builder/Dockerfile"),
+        "reference_patch_sha256": digest(ROOT / "tools/ubusd-builder/libubus-reply-fd.patch"),
         "binaries": {"upstream": identity(upstream), "rust": identity(binaries["ubusd"]),
                      "driver": identity(binaries["ubus-bench"])},
         "reference_shared_libraries": {path.name: identity(path) for path in sorted(upstream.parent.glob("*.so*"))
