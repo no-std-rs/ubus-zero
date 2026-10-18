@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject further I/O after an allocating Unix transport abandons a partial
+  send, preventing later frames from corrupting the unfinished frame.
+
 ## [0.4.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.3.0...ubus-zero-v0.4.0) (2026-10-18)
 
 

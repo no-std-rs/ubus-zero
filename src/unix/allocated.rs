@@ -18,10 +18,13 @@ use crate::{
     Transport, UbusError,
 };
 
+/// An error after a partial send makes this transport unusable. Drop it and
+/// reconnect: another frame cannot safely follow the unfinished wire frame.
 pub struct UnixUbusTransport {
     fd: OwnedFd,
     rx_buf: Vec<u8>,
     deadline: Option<u128>,
+    abandoned_send: bool,
 }
 
 impl UnixUbusTransport {
@@ -39,6 +42,7 @@ impl UnixUbusTransport {
             fd,
             rx_buf: Vec::with_capacity(1024),
             deadline: None,
+            abandoned_send: false,
         })
     }
 
@@ -72,6 +76,9 @@ impl UnixUbusTransport {
 
 impl Transport for UnixUbusTransport {
     fn send(&mut self, frame: &Frame) -> Result<(), UbusError> {
+        if self.abandoned_send {
+            return Err(UbusError::Closed);
+        }
         let bytes = Codec::write_frame(frame);
         if bytes.len() > MAX_MSG_LEN + crate::wire::HEADER_SIZE {
             return Err(UbusError::Malformed(
@@ -80,25 +87,32 @@ impl Transport for UnixUbusTransport {
         }
         let deadline = now_ns() + 5_000_000_000;
         let mut sent = 0;
-        while sent < bytes.len() {
-            self.check_deadline()?;
-            match rustix::net::send(&self.fd, &bytes[sent..], SendFlags::NOSIGNAL) {
-                Ok(0) => return Err(UbusError::Closed),
-                Ok(n) => sent += n,
-                Err(Errno::INTR) => continue,
-                Err(Errno::AGAIN) => {
-                    if now_ns() >= deadline {
-                        return Err(UbusError::Timeout("send"));
+        let result = (|| {
+            while sent < bytes.len() {
+                self.check_deadline()?;
+                match rustix::net::send(&self.fd, &bytes[sent..], SendFlags::NOSIGNAL) {
+                    Ok(0) => return Err(UbusError::Closed),
+                    Ok(n) => sent += n,
+                    Err(Errno::INTR) => continue,
+                    Err(Errno::AGAIN) => {
+                        if now_ns() >= deadline {
+                            return Err(UbusError::Timeout("send"));
+                        }
+                        self.park(PollFlags::OUT);
                     }
-                    self.park(PollFlags::OUT);
+                    Err(e) => return Err(io_error("send", e)),
                 }
-                Err(e) => return Err(io_error("send", e)),
             }
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.abandoned_send = result.is_err() && sent != 0;
+        result
     }
 
     fn recv(&mut self) -> Result<Option<Frame>, UbusError> {
+        if self.abandoned_send {
+            return Err(UbusError::Closed);
+        }
         self.check_deadline()?;
         let mut chunk = [0u8; 2048];
         let mut closed = false;
@@ -164,7 +178,7 @@ mod tests {
     use crate::{envelope::EnvBuilder, wire::MsgType};
     use rustix::fd::FromRawFd;
     use std::{
-        io::Write,
+        io::{Read, Write},
         os::{fd::IntoRawFd, unix::net::UnixStream},
     };
 
@@ -179,6 +193,7 @@ mod tests {
                 fd,
                 rx_buf: Vec::new(),
                 deadline: None,
+                abandoned_send: false,
             },
         )
     }
@@ -231,5 +246,54 @@ mod tests {
             transport.recv(),
             Err(UbusError::Timeout("transport"))
         ));
+    }
+
+    #[test]
+    fn partial_send_timeout_blocks_further_io_after_deadline_reset() {
+        let (mut peer, mut transport) = pair();
+        rustix::net::sockopt::set_socket_send_buffer_size(&transport.fd, 4096).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let mut env = EnvBuilder::new();
+        env.push_data(&alloc::vec![0x55; 128 * 1024]);
+        let frame = Frame::to_broker(MsgType::Ping, 42, env.finish());
+        transport.set_deadline(Some(Duration::from_millis(50)));
+        assert!(matches!(transport.send(&frame), Err(UbusError::Timeout(_))));
+
+        let mut prefix = Vec::new();
+        assert_eq!(
+            peer.read_to_end(&mut prefix).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(!prefix.is_empty());
+        assert!(prefix.len() < Codec::write_frame(&frame).len());
+
+        transport.set_deadline(None);
+        let next = Frame::to_broker(MsgType::Ping, 43, EnvBuilder::new().finish());
+        assert!(matches!(transport.send(&next), Err(UbusError::Closed)));
+        assert!(matches!(transport.recv(), Err(UbusError::Closed)));
+        assert_eq!(
+            peer.read(&mut [0; 32]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "a later frame must never be appended to the abandoned prefix"
+        );
+    }
+
+    #[test]
+    fn zero_byte_send_timeout_preserves_connection_for_retry() {
+        let (mut peer, mut transport) = pair();
+        let frame = Frame::to_broker(MsgType::Ping, 42, EnvBuilder::new().finish());
+        transport.set_deadline(Some(Duration::ZERO));
+        assert!(matches!(
+            transport.send(&frame),
+            Err(UbusError::Timeout("transport"))
+        ));
+        transport.set_deadline(None);
+        transport.send(&frame).unwrap();
+        let expected = Codec::write_frame(&frame);
+        let mut actual = alloc::vec![0; expected.len()];
+        peer.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        peer.write_all(&expected).unwrap();
+        assert_eq!(transport.recv().unwrap(), Some(frame));
     }
 }
