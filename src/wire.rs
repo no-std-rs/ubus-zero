@@ -88,6 +88,7 @@ pub const UBUS_STATUS_NOT_FOUND: i32 = 4;
 pub const UBUS_STATUS_NO_DATA: i32 = 5;
 pub const UBUS_STATUS_PERMISSION_DENIED: i32 = 6;
 pub const UBUS_STATUS_TIMEOUT: i32 = 7;
+pub const UBUS_STATUS_UNKNOWN_ERROR: i32 = 9;
 /// `UBUS_SYSTEM_OBJECT_ACL` from upstream `ubusmsg.h`.
 pub const UBUS_SYSTEM_OBJECT_ACL: u32 = 2;
 /// `UBUS_SYSTEM_OBJECT_MONITOR` from upstream `ubusmsg.h`.

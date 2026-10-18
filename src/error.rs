@@ -17,7 +17,7 @@ pub enum UbusError {
     Io(String),
     /// A method handler returned a domain-level error (missing arg,
     /// validation failure, downstream-side failure). The dispatcher
-    /// converts this — like any handler `Err` — into STATUS=-3 to the
+    /// converts this — like any handler `Err` — into UNKNOWN_ERROR (9) to the
     /// peer; the inner string survives in `DispatchOutcome::HandlerErr`
     /// so the daemon can log a breadcrumb. Distinguished from `Io` so
     /// callers can branch on "this was the handler talking" vs "the
