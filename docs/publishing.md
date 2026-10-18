@@ -83,6 +83,9 @@ Runnerless submits `packages.crates` after the matching workflow succeeds and
 its stable release exists. It verifies the revision, ancestry, checksums and
 package identities. On retry it reconciles registry checksums instead of
 replacing published versions. Release planning and publication stay in Runnerless.
+`Runnerless / Crate publishing trigger` explains rejected asset completions or
+confirms that publication was requested. Its success is only a trigger receipt;
+`Runnerless / crates-ubus-zero` reports the registry operation's outcome.
 
 ## Configure publishing with Runl
 

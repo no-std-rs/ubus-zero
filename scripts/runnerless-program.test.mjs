@@ -18,7 +18,7 @@ class Json {
   get json() { return JSON.stringify(this.value); }
 }
 
-function execute(details, version = '0.4.1') {
+function execute(details, version = '0.4.1', releasePublished = true) {
   const calls = [];
   const declarations = [];
   class OperationRequest {
@@ -46,14 +46,14 @@ function execute(details, version = '0.4.1') {
     RegistryPublishRequest,
     OperationRef: class { constructor(ref) { this.ref = ref; } },
     jobs: { lookup: () => ({ ok: false }) },
-    checks: { report: (name, passed) => calls.push({ operation: 'check', name, passed }) },
+    checks: { report: (name, passed, summary) => calls.push({ operation: 'check', name, passed, summary }) },
     reviews: { evaluate: () => ({ state: 'success', summary: 'clean' }) },
     repo: { readText: (path, ref) => {
       calls.push({ operation: 'read', path, ref });
       return path === 'version.txt' ? `${version}\n` : 'name = "ubusd"';
     } },
     packages: {
-      releasePublished: () => true,
+      releasePublished: () => releasePublished,
       crates: (operation, request) => calls.push({ operation: 'crates', key: operation.key,
         tag: request.tag, version: request.version, packages: request.packages }),
     },
@@ -104,17 +104,49 @@ test('tagged asset completion still publishes all three packages from its pinned
         ['ubusd', 'ubusd-0.4.1.cargo-upload'],
         ['ubus-client', 'ubus-client-0.4.1.cargo-upload'],
       ] },
+    { operation: 'check', name: 'Crate publishing trigger', passed: true,
+      summary: 'Publication requested for ubus-zero-v0.4.1. See crates-ubus-zero for the registry outcome.' },
   ]);
 });
 
 test('asset completion with a mismatched tag never requests publication', () => {
   const { calls } = execute({ ...mainBuild, workflowPath: '.github/workflows/publish-release.yml',
     headRef: 'ubus-zero-v0.4.0' });
-  assert.deepEqual(calls, [{ operation: 'read', path: 'version.txt', ref: 'head' }]);
+  assert.deepEqual(calls, [
+    { operation: 'read', path: 'version.txt', ref: 'head' },
+    { operation: 'check', name: 'Crate publishing trigger', passed: false,
+      summary: 'The workflow tag does not match version.txt at its pinned revision.' },
+  ]);
+});
+
+test('asset failures and invalid refs explain why publication was not requested', () => {
+  const assets = { ...mainBuild, workflowPath: '.github/workflows/publish-release.yml',
+    headRef: 'ubus-zero-v0.4.1' };
+  for (const conclusion of ['failure', 'cancelled', 'skipped', null]) {
+    assert.deepEqual(execute({ ...assets, conclusion }).calls, [
+      { operation: 'check', name: 'Crate publishing trigger', passed: false,
+        summary: 'The release-asset workflow did not succeed.' },
+    ]);
+  }
+  for (const headRef of ['main', 'feature', '', null]) {
+    assert.deepEqual(execute({ ...assets, headRef }).calls, [
+      { operation: 'check', name: 'Crate publishing trigger', passed: false,
+        summary: 'The release-asset workflow did not run on a ubus-zero release tag.' },
+    ]);
+  }
+  const missingRelease = execute(assets, '0.4.1', false).calls;
+  assert.deepEqual(missingRelease, [
+    { operation: 'read', path: 'version.txt', ref: 'head' },
+    { operation: 'check', name: 'Crate publishing trigger', passed: false,
+      summary: 'No stable published release matches the workflow tag and commit.' },
+  ]);
+  for (const action of ['requested', 'in_progress']) {
+    assert.deepEqual(execute({ ...assets, action }).calls, []);
+  }
 });
 
 test('review and completion events never stage release recovery', () => {
   assert.deepEqual(execute({ event: 'runnerless_completion' }).calls, []);
   assert.deepEqual(execute({ event: 'issue_comment', pullNumber: 41, state: 'open' }).calls,
-    [{ operation: 'check', name: 'Codex review', passed: true }]);
+    [{ operation: 'check', name: 'Codex review', passed: true, summary: 'clean' }]);
 });
