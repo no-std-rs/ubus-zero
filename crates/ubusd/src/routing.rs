@@ -182,8 +182,13 @@ fn dispatch_add_object(
     subs: &mut SubscriberRegistry,
     events: &mut EventRegistry,
 ) -> Vec<Action> {
-    let signature = find(frame.payload, UbusAttr::Signature)
-        .and_then(|attr| object_signature(attr.as_blobmsg()));
+    let signature_attr = find(frame.payload, UbusAttr::Signature);
+    let requested_type = find(frame.payload, UbusAttr::ObjType).and_then(|a| a.as_u32());
+    let signature = if requested_type.is_none() {
+        signature_attr.and_then(|attr| object_signature(attr.as_blobmsg()))
+    } else {
+        None
+    };
     // Named objects broadcast `ubus.object.add` once registered; capture
     // the path so we can mint that event after the owner's reply.
     let mut named_path: Option<String> = None;
@@ -192,7 +197,7 @@ fn dispatch_add_object(
             if !acl.check(cred, path, AclOp::Publish, None) {
                 return status_action(frame, src_peer, UBUS_STATUS_INVALID_ARGUMENT);
             }
-            match objects.insert(path.to_string(), src_peer, signature) {
+            match objects.insert_with_type(path.to_string(), src_peer, signature, requested_type) {
                 Ok(v) => {
                     named_path = Some(path.to_string());
                     v
@@ -210,7 +215,7 @@ fn dispatch_add_object(
                 }
             }
         }
-        None => match objects.insert_anonymous(src_peer) {
+        None => match objects.insert_anonymous_with_type(src_peer, signature, requested_type) {
             Ok(id) => (id, None),
             Err(_) => {
                 // Same exhaustion shape as named ADD_OBJECT: no ubus
@@ -247,7 +252,7 @@ fn dispatch_add_object(
         src_peer,
         frame,
         obj_id,
-        objects.type_of(obj_id).map(|t| t.id()),
+        signature_attr.and_then(|_| objects.type_of(obj_id).map(|t| t.id())),
     );
     // A named registration broadcasts `ubus.object.add` to matching
     // listeners (anonymous objects are silent — pathless, LOOKUP-hidden).
@@ -871,8 +876,14 @@ fn dispatch_unsubscribe(
     if !removed {
         return status_action(frame, src_peer, UBUS_STATUS_NOT_FOUND);
     }
-    if let Some(peer) = peers.get_mut(src_peer) {
-        peer.remove_sub(obj_id);
+    if subs
+        .subscribers_of(obj_id)
+        .iter()
+        .all(|s| s.peer_id != src_peer)
+    {
+        if let Some(peer) = peers.get_mut(src_peer) {
+            peer.remove_sub(obj_id);
+        }
     }
     let mut out = Vec::new();
     if became_inactive {
