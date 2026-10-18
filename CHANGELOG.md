@@ -50,6 +50,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Report positive ubus provider statuses: INVALID_ARGUMENT (2),
+  METHOD_NOT_FOUND (3) and UNKNOWN_ERROR (9), replacing private negative codes.
 - Require broker-origin replies for provider registration and acknowledged removal.
 - Match client replies by both sequence and object, preserve interleaved events
   and invocation replies, and avoid reusing live sequences across wraparound.

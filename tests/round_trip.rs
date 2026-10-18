@@ -459,14 +459,18 @@ fn invoke_surfaces_handler_error_status() {
     let err = cli
         .invoke(7, "fail", &BlobMsgTable::empty())
         .expect_err("handler error");
-    // Sign round-trips: handler Err → server STATUS=-3 → client surfaces
-    // Status(-3) (i32 → u32 → i32 must preserve sign).
-    assert!(matches!(err, UbusError::Status(-3)), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            UbusError::Status(ubus::wire::UBUS_STATUS_UNKNOWN_ERROR)
+        ),
+        "got {err:?}"
+    );
     server.join().unwrap();
 }
 
 #[test]
-fn invoke_surfaces_unknown_method_status_minus_two() {
+fn invoke_surfaces_unknown_method_not_found() {
     let (cli_t, srv_t) = YieldingMock::pair();
     let server = thread::spawn(move || {
         let obj = UbusObject::new("example").method("known", |_| Ok(BlobMsgTable::empty()));
@@ -484,7 +488,13 @@ fn invoke_surfaces_unknown_method_status_minus_two() {
     let err = cli
         .invoke(7, "unknown", &BlobMsgTable::empty())
         .expect_err("unknown method");
-    assert!(matches!(err, UbusError::Status(-2)), "got {err:?}");
+    assert!(
+        matches!(
+            err,
+            UbusError::Status(ubus::wire::UBUS_STATUS_METHOD_NOT_FOUND)
+        ),
+        "got {err:?}"
+    );
     server.join().unwrap();
 }
 

@@ -13,7 +13,10 @@ use crate::client::do_hello_handshake;
 use crate::error::UbusError;
 use crate::msg::{InboundMsg, OutboundMsg};
 use crate::transport::Transport;
-use crate::wire::{MsgType, ObjId, PeerId, IDLE_WAIT_BUDGET};
+use crate::wire::{
+    MsgType, ObjId, PeerId, IDLE_WAIT_BUDGET, UBUS_STATUS_INVALID_ARGUMENT,
+    UBUS_STATUS_METHOD_NOT_FOUND, UBUS_STATUS_UNKNOWN_ERROR,
+};
 
 /// Receives the *contents* of the INVOKE's outer TABLE wrapper so the
 /// handler can `lookup(args, "key")` directly. Returns the reply
@@ -62,20 +65,20 @@ impl UbusObject {
 /// Result of a single [`UbusConnection::poll_one`] tick. Lets the
 /// caller distinguish "no frame available" from "frame ignored",
 /// "INVOKE handled successfully", "handler returned an error" (already
-/// reported as STATUS=-3 to the peer; surfaced here so the caller can
+/// reported as UNKNOWN_ERROR (9) to the peer; surfaced here so the caller can
 /// log via injected telemetry), and "INVOKE was malformed" (already
-/// reported as STATUS=-1, but surfaced for the same reason).
+/// reported as INVALID_ARGUMENT (2), but surfaced for the same reason).
 #[derive(Debug)]
 pub enum DispatchOutcome {
     /// Transport had no frame queued.
     Idle,
     /// INVOKE dispatched successfully; reply already sent.
     Handled,
-    /// Handler returned an error; STATUS=-3 already sent. Inner error
+    /// Handler returned an error; UNKNOWN_ERROR (9) already sent. Inner error
     /// is the handler's error so callers can record it.
     HandlerErr(UbusError),
     /// Frame was an INVOKE but malformed (no Method attr, corrupt
-    /// envelope, etc.); STATUS=-1 already sent.
+    /// envelope, etc.); INVALID_ARGUMENT (2) already sent.
     Malformed(UbusError),
     /// Frame's MsgType wasn't INVOKE (PING, STATUS, etc.) — accepted
     /// and consumed without a reply.
@@ -238,7 +241,7 @@ impl<T: Transport> UbusConnection<T> {
     /// Process at most one queued frame. Returns a [`DispatchOutcome`]
     /// describing what happened — callers should record `HandlerErr` /
     /// `Malformed` via injected telemetry if they care to surface
-    /// dispatch problems beyond the wire-level STATUS=-1/-3 already
+    /// dispatch problems beyond the wire-level INVALID_ARGUMENT/UNKNOWN_ERROR already
     /// sent to the peer.
     pub fn poll_one(&mut self) -> Result<DispatchOutcome, UbusError> {
         let frame = match self.transport.recv()? {
@@ -255,9 +258,9 @@ impl<T: Transport> UbusConnection<T> {
             Ok(p) => p,
             Err(e) => {
                 // Couldn't even decode the envelope — only INVOKE has
-                // a meaningful "reply -1" path; anything else, drop.
+                // a meaningful "reply INVALID_ARGUMENT" path; anything else, drop.
                 if frame.hdr.ty == MsgType::Invoke {
-                    self.send_status(frame.hdr.seq, frame.hdr.peer, -1)?;
+                    self.send_status(frame.hdr.seq, frame.hdr.peer, UBUS_STATUS_INVALID_ARGUMENT)?;
                     return Ok(DispatchOutcome::Malformed(e));
                 }
                 return Ok(DispatchOutcome::Ignored(frame.hdr.ty));
@@ -272,7 +275,7 @@ impl<T: Transport> UbusConnection<T> {
                 data,
             } => {
                 if obj_id.get() != self.object_id {
-                    self.send_status(seq, peer, -1)?;
+                    self.send_status(seq, peer, UBUS_STATUS_INVALID_ARGUMENT)?;
                     return Ok(DispatchOutcome::Malformed(UbusError::Malformed(
                         "INVOKE addressed to different ObjId",
                     )));
@@ -298,7 +301,7 @@ impl<T: Transport> UbusConnection<T> {
             Some(blobmsg_contents) => match validate_data_args(blobmsg_contents) {
                 Ok(args) => args,
                 Err(e) => {
-                    self.send_status(seq, peer, -1)?;
+                    self.send_status(seq, peer, UBUS_STATUS_INVALID_ARGUMENT)?;
                     return Ok(DispatchOutcome::Malformed(e));
                 }
             },
@@ -307,7 +310,7 @@ impl<T: Transport> UbusConnection<T> {
         let handler = match self.object.methods.iter_mut().find(|m| m.name == method) {
             Some(h) => h,
             None => {
-                self.send_status(seq, peer, -2)?;
+                self.send_status(seq, peer, UBUS_STATUS_METHOD_NOT_FOUND)?;
                 return Ok(DispatchOutcome::Handled);
             }
         };
@@ -318,7 +321,7 @@ impl<T: Transport> UbusConnection<T> {
                 Ok(DispatchOutcome::Handled)
             }
             Err(e) => {
-                self.send_status(seq, peer, -3)?;
+                self.send_status(seq, peer, UBUS_STATUS_UNKNOWN_ERROR)?;
                 Ok(DispatchOutcome::HandlerErr(e))
             }
         }
@@ -390,7 +393,7 @@ fn inline_obj_id(frame_payload: &[u8]) -> Option<u32> {
 /// blob_len(msg))` puts the *contents* of the args TABLE — without the
 /// outer wrapper — directly under DATA). Empty payload is `(NULL, 0)`'s
 /// no-args shape and is fine. Any TLV violation surfaces as `Malformed`
-/// so the dispatcher replies `STATUS=-1` instead of handing garbage to
+/// so the dispatcher replies `INVALID_ARGUMENT (2)` instead of handing garbage to
 /// a handler.
 fn validate_data_args(blobmsg_contents: &[u8]) -> Result<&[u8], UbusError> {
     let mut it = BlobIter::new(blobmsg_contents);
@@ -517,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_unknown_method_returns_negative_status() {
+    fn dispatch_unknown_method_returns_method_not_found() {
         let (a, mut b) = MockTransport::pair();
         let obj = UbusObject::new("example").method("known", |_| Ok(BlobMsgTable::empty()));
         let mut srv = server_with_obj(a, obj);
@@ -527,7 +530,7 @@ mod tests {
         let s = find(&status.payload, UbusAttr::Status)
             .and_then(|a| a.as_u32())
             .map(|u| u as i32);
-        assert_eq!(s, Some(-2));
+        assert_eq!(s, Some(crate::wire::UBUS_STATUS_METHOD_NOT_FOUND));
     }
 
     #[test]
@@ -561,11 +564,11 @@ mod tests {
         assert!(matches!(srv.poll_one().unwrap(), DispatchOutcome::Idle));
     }
 
-    /// Corrupt-envelope INVOKE replies `-1` (malformed) and surfaces
+    /// Corrupt-envelope INVOKE replies `INVALID_ARGUMENT` (malformed) and surfaces
     /// `DispatchOutcome::Malformed` so the caller can log via injected
     /// telemetry.
     #[test]
-    fn dispatch_corrupt_envelope_replies_status_minus_one() {
+    fn dispatch_corrupt_envelope_replies_invalid_argument() {
         let (a, mut b) = MockTransport::pair();
         let obj = UbusObject::new("example").method("ping", |_| Ok(BlobMsgTable::empty()));
         let mut srv = server_with_obj(a, obj);
@@ -579,13 +582,13 @@ mod tests {
         let s = find(&status.payload, UbusAttr::Status)
             .and_then(|a| a.as_u32())
             .map(|u| u as i32);
-        assert_eq!(s, Some(-1));
+        assert_eq!(s, Some(UBUS_STATUS_INVALID_ARGUMENT));
     }
 
-    /// INVOKE envelope without `Method` must reply `-1` and surface
+    /// INVOKE envelope without `Method` must reply `INVALID_ARGUMENT` and surface
     /// Malformed — distinct from "method name doesn't match".
     #[test]
-    fn dispatch_missing_method_attr_replies_status_minus_one() {
+    fn dispatch_missing_method_attr_replies_invalid_argument() {
         let (a, mut b) = MockTransport::pair();
         let obj = UbusObject::new("example").method("ping", |_| Ok(BlobMsgTable::empty()));
         let mut srv = server_with_obj(a, obj);
@@ -602,14 +605,14 @@ mod tests {
         let s = find(&status.payload, UbusAttr::Status)
             .and_then(|a| a.as_u32())
             .map(|u| u as i32);
-        assert_eq!(s, Some(-1));
+        assert_eq!(s, Some(UBUS_STATUS_INVALID_ARGUMENT));
     }
 
     /// INVOKE with a Data attr whose blobmsg wrapper is corrupt must
-    /// reply `-1` and surface Malformed, not silently dispatch with
+    /// reply `INVALID_ARGUMENT` and surface Malformed, not silently dispatch with
     /// empty args.
     #[test]
-    fn dispatch_corrupt_data_wrapper_replies_status_minus_one() {
+    fn dispatch_corrupt_data_wrapper_replies_invalid_argument() {
         let (a, mut b) = MockTransport::pair();
         let obj = UbusObject::new("example").method("ping", |_| Ok(BlobMsgTable::empty()));
         let mut srv = server_with_obj(a, obj);
@@ -627,15 +630,15 @@ mod tests {
         let s = find(&status.payload, UbusAttr::Status)
             .and_then(|a| a.as_u32())
             .map(|u| u as i32);
-        assert_eq!(s, Some(-1));
+        assert_eq!(s, Some(UBUS_STATUS_INVALID_ARGUMENT));
     }
 
-    /// Handler error surfaces both as `STATUS=-3` to the peer and as
+    /// Handler error surfaces both as `UNKNOWN_ERROR (9)` to the peer and as
     /// `DispatchOutcome::HandlerErr` to the caller — the caller can
     /// then record the inner error via injected telemetry without the
     /// peer needing to carry the error string.
     #[test]
-    fn dispatch_handler_err_surfaces_outcome_and_status_minus_three() {
+    fn dispatch_handler_err_surfaces_outcome_and_unknown_error() {
         let (a, mut b) = MockTransport::pair();
         let obj = UbusObject::new("example").method("fail", |_| Err(UbusError::Malformed("boom")));
         let mut srv = server_with_obj(a, obj);
@@ -648,7 +651,7 @@ mod tests {
         let s = find(&status.payload, UbusAttr::Status)
             .and_then(|a| a.as_u32())
             .map(|u| u as i32);
-        assert_eq!(s, Some(-3));
+        assert_eq!(s, Some(UBUS_STATUS_UNKNOWN_ERROR));
     }
 
     /// A non-INVOKE frame (PING) is consumed but reported as Ignored
