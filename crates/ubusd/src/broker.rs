@@ -727,8 +727,15 @@ impl Broker {
                 }
                 self.tx_scratch = bytes;
             }
-            Action::SendBytes { peer_id, bytes } => {
+            Action::SendNotify {
+                peer_id,
+                template,
+                obj_id,
+            } => {
+                let mut bytes = std::mem::take(&mut self.tx_scratch);
+                template.write_into(obj_id, &mut bytes);
                 self.send_encoded(peer_id, &bytes);
+                self.tx_scratch = bytes;
             }
             Action::ClosePeer { peer_id } => {
                 self.pending_close.insert(peer_id);
@@ -1657,6 +1664,113 @@ mod tests {
             .add_peer(broker.peers.get(id).unwrap().fd.as_ref().unwrap(), id)
             .unwrap();
         (id, client)
+    }
+
+    #[cfg(feature = "testing")]
+    #[test]
+    fn notify_scratch_preserves_queued_ids_payloads_and_monitor_records() {
+        use ubus::envelope::EnvBuilder;
+
+        fn read_exact(fd: &OwnedFd, len: usize) -> Vec<u8> {
+            let mut bytes = vec![0; len];
+            let mut read = 0;
+            while read < len {
+                let n = rustix::io::read(fd, &mut bytes[read..]).unwrap();
+                assert_ne!(n, 0);
+                read += n;
+            }
+            bytes
+        }
+
+        for monitored in [false, true] {
+            for budget in [0, 13] {
+                let mut broker = memory_broker();
+                let (owner, _publisher) = memory_peer(&mut broker);
+                let (slow, slow_socket) = memory_peer(&mut broker);
+                let (fast, fast_socket) = memory_peer(&mut broker);
+                broker.config.tx_governor = Some(WriteGovernor {
+                    peer_index: slow.get() - FIRST_PEER_ID.get(),
+                    budget_bytes: budget,
+                });
+                let monitor = monitored.then(|| {
+                    let (id, socket) = memory_peer(&mut broker);
+                    broker.monitors.add(id);
+                    socket
+                });
+                let target = broker.objects.insert_anonymous(owner).unwrap();
+                let mut expected = Vec::new();
+                let data = vec![0x5a; 4096];
+                for peer in [slow, slow, fast] {
+                    let obj_id = broker.objects.insert_anonymous(peer).unwrap();
+                    broker.subs.add(target, peer, obj_id);
+                    expected.push((
+                        peer,
+                        Codec::write_frame(&reply::stamped_invoke(
+                            71,
+                            owner,
+                            obj_id,
+                            Some("update"),
+                            None,
+                            None,
+                            Some(&data),
+                            true,
+                        )),
+                    ));
+                }
+                let mut env = EnvBuilder::new();
+                env.push_u32(UbusAttr::ObjId, target.get());
+                env.push_str(UbusAttr::Method, "update");
+                env.push_data(&data);
+                env.push_u8(UbusAttr::NoReply, 1);
+                let actions = routing::dispatch(
+                    &Frame::to_broker(MsgType::Notify, 71, env.finish()),
+                    owner,
+                    &broker.acl,
+                    broker.acl_sequence,
+                    &mut broker.peers,
+                    &mut broker.objects,
+                    &mut broker.subs,
+                    &mut broker.events,
+                    &mut broker.monitors,
+                    &mut None,
+                );
+                broker.apply_actions(actions);
+
+                let slow_bytes = [&expected[0].1[..], &expected[1].1[..]].concat();
+                assert_eq!(read_exact(&slow_socket, budget), slow_bytes[..budget]);
+                assert_eq!(
+                    broker.peers.get(slow).unwrap().tx_buf,
+                    &slow_bytes[budget..]
+                );
+                assert_eq!(read_exact(&fast_socket, expected[2].1.len()), expected[2].1);
+                // The shared template is gone and scratch has been restamped for
+                // the fast peer. Flushing must still deliver both slow IDs.
+                broker.config.tx_governor = None;
+                broker.drain_tx(slow);
+                assert_eq!(
+                    read_exact(&slow_socket, slow_bytes.len() - budget),
+                    slow_bytes[budget..]
+                );
+                if let Some(monitor) = monitor {
+                    let mirrors: Vec<u8> = expected
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(index, (dest, bytes))| {
+                            Codec::write_frame(&reply::monitor_mirror(
+                                index as u16 + 1,
+                                dest.get(),
+                                owner.get(),
+                                71,
+                                MsgType::Invoke as u8,
+                                true,
+                                &bytes[12..],
+                            ))
+                        })
+                        .collect();
+                    assert_eq!(read_exact(&monitor, mirrors.len()), mirrors);
+                }
+            }
+        }
     }
 
     #[test]

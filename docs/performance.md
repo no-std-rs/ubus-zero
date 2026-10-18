@@ -149,10 +149,27 @@ calls. It also repeatedly registers/removes a named object and reports live
 allocated bytes after 1,000, 2,000 and 4,000 cycles, with no live objects.
 Dropping that registry should release its measured retained bytes.
 
-This diagnostic covers Rust routing only: socket I/O, codec and broker-loop
-allocations are excluded. It is not a timing benchmark or a C comparison.
+It also measures one NoReply NOTIFY dispatch at 1, 8 and 64 subscribers with
+4 KiB and 64 KiB payloads. Each delivery is decoded and checked for its
+destination object, publisher, sequence, method, payload and NoReply flag.
+The diagnostic checks that deliveries share one template and that the count
+of payload-sized allocations stays constant as subscribers increase.
+It reports allocation/reallocation calls, cumulative requested allocation
+bytes and live bytes retained by the resulting actions. Requested bytes count
+each allocation or reallocation request in full; they are not peak live heap
+or process RSS. Setup, delivery materialization and verification occur outside
+the measured dispatch.
+
+This diagnostic covers Rust dispatch only, including NOTIFY template encoding.
+Socket I/O and broker-loop allocations are excluded. It is not a timing benchmark or a C comparison.
 Run the same example against the desired baseline to compare source changes.
 The instrumentation itself adds overhead and belongs outside timing runs.
+
+NOTIFY actions share an immutable encoded template. Delivery stamps the
+subscriber's object ID into the broker's reusable transmit scratch before
+monitoring and sending. A partial or blocked write copies its remaining bytes
+into that peer's ordinary queue, so queued output retains independent contents
+and the existing slow-reader byte limit.
 
 ## CI
 
