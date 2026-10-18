@@ -106,6 +106,10 @@ bookkeeping in the handler. Other request types still need their normal reply
 processing; INVOKE does not acquire NOTIFY's NoReply semantics.
 
 The broker and high-level client/provider continue to use heap storage.
+If the allocating `UnixUbusTransport` returns an error after partially sending
+a frame, further sends and receives return `Closed`, including after resetting
+its deadline. Drop that transport and reconnect. A timeout before any bytes
+were sent leaves the connection reusable after resetting its deadline.
 `examples/noalloc-smoke` is a freestanding RISC-V link check with no allocator;
 the queue-to-stream compatibility scenario additionally runs against pinned C,
 Rust and a checked-in C transcript.
