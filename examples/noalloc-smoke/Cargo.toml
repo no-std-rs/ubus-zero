@@ -1,0 +1,14 @@
+[package]
+name = "ubus-noalloc-smoke"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+ubus = { package = "ubus-zero", path = "../..", default-features = false }
+
+[profile.release]
+panic = "abort"
+opt-level = "z"

@@ -78,6 +78,7 @@ six with the matrix, seven with both).
 | Non-root ACL lookup | 100 objects and 100 access rules | Exact visible objects and signatures |
 | Registration churn | Repeated named register/remove | Assigned identity and exact removal response |
 | Ping with idle peers | 200 other connected clients | Successful ping |
+| Ping after bursts | 200 peers each completed a 32 KiB-payload ping before timing | Successful ping after setup DATA/STATUS; post-burst RSS and lifetime peak |
 | Event fanout | 50 listeners | Every destination, method, payload and per-listener sequence progression |
 | NOTIFY fanout | 50 subscribers, NoReply enabled | Every destination, publisher address, sequence, method, payload and NoReply flag |
 
@@ -164,3 +165,19 @@ the Actions summary.
 Wrong replies, missing fixtures, invalid CPU/memory counters and broken runs fail
 CI. Timing has no pass/fail thresholds. Strict compatibility and fault-profile
 checks independently establish protocol correctness.
+
+
+## Buffer retention
+
+Accepted peers allocate receive and transmit byte storage when needed. Once a
+request batch is fully decoded or an output queue drains, its storage returns
+to one broker-wide spare for that direction. Incomplete input and backpressured
+output remain attached to their peer. Idle peers retain no byte-buffer capacity.
+Each spare is capped at 64 KiB after draining; larger storage shrinks to 4 KiB.
+The separate adaptive receive scratch and encoding scratch remain shared.
+
+`ping-after-burst` first keeps 200 peers connected after each completes a
+32 KiB-payload ping. Setup and echo validation are outside timing. The timed
+work is ordinary ping; compare RSS with `ping-idle` to see retained capacity
+rather than throughput of the initial bursts. RSS includes mapped code and
+libraries, so it is distinct from requested live heap and allocation counts.

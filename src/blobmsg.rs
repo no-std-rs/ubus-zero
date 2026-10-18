@@ -6,8 +6,11 @@
 //! `name_len = 0` — libubox emits one unconditionally and `blobmsg_data`
 //! relies on the EXT bit, not on the array-vs-table context, to skip it.
 
+#[cfg(feature = "alloc")]
 use alloc::format;
+#[cfg(feature = "alloc")]
 use alloc::string::{String, ToString};
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use crate::blob::{EXT_FLAG, ID_MASK, ID_SHIFT, LEN_MASK};
@@ -58,6 +61,7 @@ pub enum BlobValue<'a> {
     Raw(&'a [u8]),
 }
 
+#[cfg(feature = "alloc")]
 pub struct BlobBuilder {
     buf: Vec<u8>,
     /// Offsets into `buf` of currently-open container `id_len` fields,
@@ -65,12 +69,14 @@ pub struct BlobBuilder {
     open: Vec<usize>,
 }
 
+#[cfg(feature = "alloc")]
 impl Default for BlobBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl BlobBuilder {
     pub fn new() -> Self {
         Self {
@@ -433,10 +439,12 @@ pub fn try_lookup<'a>(buf: &'a [u8], key: &str) -> Result<Option<BlobRef<'a>>, U
 /// `BlobBuilder::finish_table` is the imperative-style escape hatch
 /// (debug-asserts the shape).
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(feature = "alloc")]
 pub struct BlobMsgTable {
     bytes: Vec<u8>,
 }
 
+#[cfg(feature = "alloc")]
 impl BlobMsgTable {
     pub fn build(f: impl FnOnce(&mut BlobBuilder)) -> Self {
         let mut b = BlobBuilder::new();
@@ -504,6 +512,7 @@ impl BlobMsgTable {
 /// Best-effort JSON render. `named` only controls outer brackets
 /// (`{}` vs `[]`); the per-attr name header is always present on the
 /// wire and rendered when non-empty.
+#[cfg(feature = "alloc")]
 pub fn to_json(buf: &[u8], named: bool) -> String {
     let mut s = String::new();
     if named {
@@ -547,6 +556,7 @@ pub fn to_json(buf: &[u8], named: bool) -> String {
     s
 }
 
+#[cfg(feature = "alloc")]
 fn json_escape_into(out: &mut String, s: &str) {
     for c in s.chars() {
         match c {
@@ -566,6 +576,7 @@ fn json_escape_into(out: &mut String, s: &str) {
 }
 
 /// Formats a double as libblobmsg_json's `%.17g` output.
+#[cfg(feature = "alloc")]
 fn fmt_double_g17(v: f64) -> String {
     if v.is_nan() {
         return if v.is_sign_negative() {
@@ -636,11 +647,12 @@ fn fmt_double_g17(v: f64) -> String {
     out
 }
 
+#[cfg(feature = "alloc")]
 fn push_i64(out: &mut String, v: i64) {
     out.push_str(&v.to_string());
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
 

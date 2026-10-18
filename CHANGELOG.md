@@ -22,6 +22,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Allocator-free borrowed codecs and fixed-buffer envelope/blobmsg builders;
+  disable the new default `alloc` feature to link without a global allocator.
+  Existing users of owned APIs with `default-features = false` must enable
+  `alloc` explicitly (JSON/Unix/portable-atomic features imply it).
+- Linux bounded signal-handler submission and a resumable allocation-free
+  stream sender, with atomic whole-frame rejection on queue saturation.
+- Post-burst idle-peer memory benchmark, allocation-trapped real-signal tests
+  and a freestanding C3-target link check without an allocator.
 - Broker CPU/RSS counters, trial uncertainty intervals, compiler-profile and
   allocation diagnostics, and verified registry/ACL/idle-peer/fanout benchmarks.
 - A verified 32-request pipelined ping benchmark to cover broker batching, and
@@ -42,6 +50,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Allocate per-peer byte buffers lazily and recycle empty receive/transmit
+  buffers through bounded broker-wide spares, preserving partial input and FDs.
 - Verify relay descriptor closure with per-pipe EOF instead of process-wide FD
   counts that race parallel tests.
 - Reset the request idle budget on accepted DATA so long object listings do

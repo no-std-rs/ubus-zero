@@ -10,9 +10,12 @@
 //! Inner attrs are bare [`crate::blob`] (no name field). The named
 //! blobmsg layer is only reached via [`UbusAttr::Data`].
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use crate::blob::{self, LEN_MASK};
+use crate::blob;
+#[cfg(feature = "alloc")]
+use crate::blob::LEN_MASK;
 use crate::error::UbusError;
 
 /// Wire ids per OpenWrt libubox `UBUS_ATTR_*`.
@@ -70,18 +73,21 @@ impl UbusAttr {
     }
 }
 
+#[cfg(feature = "alloc")]
 pub struct EnvBuilder {
     /// Full outer-attr buffer (id=0 BLOB_ATTR_UNSPEC). The leading
     /// 4-byte `id_len` header is back-patched on `finish`.
     buf: Vec<u8>,
 }
 
+#[cfg(feature = "alloc")]
 impl Default for EnvBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl EnvBuilder {
     pub fn new() -> Self {
         Self::with_capacity(32)
@@ -174,16 +180,19 @@ impl EnvBuilder {
     }
 }
 
+#[cfg(feature = "alloc")]
 pub struct AttrBuilder {
     buf: Vec<u8>,
 }
 
+#[cfg(feature = "alloc")]
 impl Default for AttrBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "alloc")]
 impl AttrBuilder {
     pub fn new() -> Self {
         Self { buf: Vec::new() }
@@ -359,7 +368,7 @@ pub fn read_status(frame_payload: &[u8]) -> Result<i32, UbusError> {
         .ok_or(UbusError::Malformed("missing or short Status attr"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
 

@@ -9,6 +9,7 @@
 //!
 //! `EXT = 1` means the payload carries an embedded name (blobmsg).
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use crate::error::UbusError;
@@ -32,6 +33,7 @@ pub fn align4(n: usize) -> usize {
 /// field (≈16 MiB). Real ubusd frames are kilobyte-scale; truncation
 /// here would silently produce a frame whose declared length is smaller
 /// than the appended bytes, corrupting the next frame on the wire.
+#[cfg(feature = "alloc")]
 pub fn encode_into(out: &mut Vec<u8>, id: u8, extended: bool, payload: &[u8]) {
     debug_assert!(id < 0x80, "blob id must fit in 7 bits");
     let total_len = HDR_LEN
@@ -127,7 +129,7 @@ impl<'a> Iterator for BareIter<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
 

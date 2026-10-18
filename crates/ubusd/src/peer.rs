@@ -99,8 +99,8 @@ impl Peer {
             credentials: Arc::new(credentials),
             #[cfg(target_os = "linux")]
             write_interest: false,
-            rx_buf: Vec::with_capacity(2048),
-            tx_buf: VecDeque::with_capacity(2048),
+            rx_buf: Vec::new(),
+            tx_buf: VecDeque::new(),
             rx_fds: VecDeque::new(),
             rx_abs: 0,
             tx_fds: VecDeque::new(),
