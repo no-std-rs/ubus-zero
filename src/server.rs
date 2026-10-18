@@ -167,7 +167,10 @@ impl<T: Transport> UbusConnection<T> {
                     continue;
                 }
             };
-            if frame.hdr.seq != seq {
+            if frame.hdr.seq != seq
+                || frame.hdr.peer != 0
+                || !matches!(frame.hdr.ty, MsgType::Data | MsgType::Status)
+            {
                 continue;
             }
             match InboundMsg::parse(&frame)? {
@@ -220,7 +223,7 @@ impl<T: Transport> UbusConnection<T> {
                 self.transport.wait_recv();
                 continue;
             };
-            if frame.hdr.seq != seq || frame.hdr.ty != crate::wire::MsgType::Status {
+            if frame.hdr.seq != seq || frame.hdr.peer != 0 || frame.hdr.ty != MsgType::Status {
                 continue;
             }
             let status = crate::envelope::read_status(&frame.payload)?;
@@ -419,6 +422,44 @@ mod tests {
             Err(UbusError::NotRegistered)
         ));
     }
+    #[test]
+    fn registration_ignores_replies_from_an_object_instead_of_the_broker() {
+        let (transport, mut peer) = MockTransport::pair();
+        queue_hello(&mut peer, 0, 1025);
+        for (source, object) in [(42, 99), (0, 7)] {
+            let mut env = EnvBuilder::new();
+            env.push_u32(UbusAttr::ObjId, object);
+            peer.send(&Frame::to_peer(MsgType::Data, 2, source, env.finish()))
+                .unwrap();
+            let mut env = EnvBuilder::new();
+            env.push_i32(UbusAttr::Status, 0);
+            peer.send(&Frame::to_peer(MsgType::Status, 2, source, env.finish()))
+                .unwrap();
+        }
+        let server =
+            UbusConnection::connect_and_register(transport, UbusObject::new("example")).unwrap();
+        assert_eq!(server.object_id(), 7);
+    }
+
+    #[test]
+    fn acknowledged_removal_ignores_an_unrelated_objects_status() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut server = UbusConnection::with_object_id(transport, UbusObject::new("example"), 7);
+        for (source, status) in [(42, 6), (0, 0)] {
+            let mut env = EnvBuilder::new();
+            env.push_i32(UbusAttr::Status, status);
+            peer.send(&Frame::to_peer(
+                MsgType::Status,
+                server.seq,
+                source,
+                env.finish(),
+            ))
+            .unwrap();
+        }
+        server.unregister_and_wait().unwrap();
+        assert_eq!(server.object_id(), 0);
+    }
+
     use crate::blobmsg::lookup;
     use crate::envelope::{find, EnvBuilder, UbusAttr};
     use crate::transport::MockTransport;
