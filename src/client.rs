@@ -12,6 +12,10 @@ use crate::msg::{InboundMsg, OutboundMsg};
 use crate::transport::Transport;
 use crate::wire::{Frame, MsgType, ObjId, HELLO_NON_HELLO_BUDGET, IDLE_WAIT_BUDGET, MAX_MSG_LEN};
 
+const MAX_PENDING_MESSAGES: usize = 256;
+const MAX_PENDING_BYTES: usize = MAX_MSG_LEN * 8;
+const MAX_PENDING_INVOKES: usize = 256;
+
 /// An object returned by a broker lookup, including its method signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectInfo {
@@ -69,6 +73,8 @@ pub struct UbusClient<T: Transport> {
     /// "0 means unknown" overload that production rejects on HELLO.
     peer_id: Option<u32>,
     queued: VecDeque<Frame>,
+    queued_bytes: usize,
+    pending_invokes: Vec<(u16, u32)>,
 }
 
 impl<T: Transport> UbusClient<T> {
@@ -81,6 +87,8 @@ impl<T: Transport> UbusClient<T> {
             seq: 1,
             peer_id: None,
             queued: VecDeque::new(),
+            queued_bytes: 0,
+            pending_invokes: Vec::new(),
         };
         let seq = s.next_seq();
         s.peer_id = Some(do_hello_handshake(&mut s.transport, seq)?);
@@ -91,6 +99,8 @@ impl<T: Transport> UbusClient<T> {
         self.peer_id
     }
 
+    /// Low-level transport access. Raw reads bypass invocation tracking; after
+    /// consuming a split-phase reply this way, call [`Self::forget_invoke`].
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
     }
@@ -104,6 +114,17 @@ impl<T: Transport> UbusClient<T> {
         ty: MsgType,
         peer: u32,
         envelope: EnvBuilder,
+        on_data: impl FnMut(&Frame) -> Result<(), UbusError>,
+    ) -> Result<(), UbusError> {
+        self.request_with_phase(ty, peer, envelope, "request", on_data)
+    }
+
+    fn request_with_phase(
+        &mut self,
+        ty: MsgType,
+        peer: u32,
+        envelope: EnvBuilder,
+        phase: &'static str,
         mut on_data: impl FnMut(&Frame) -> Result<(), UbusError>,
     ) -> Result<(), UbusError> {
         let seq = self.next_seq();
@@ -111,42 +132,82 @@ impl<T: Transport> UbusClient<T> {
             .send(&Frame::to_peer(ty, seq, peer, envelope.finish()))?;
         let mut idle_waits = 0;
         loop {
-            let Some(frame) = self.transport.recv()? else {
+            let Some(frame) = self.recv_matching(seq, peer)? else {
                 idle_waits += 1;
                 if idle_waits > IDLE_WAIT_BUDGET {
-                    return Err(UbusError::Timeout("request"));
+                    return Err(UbusError::Timeout(phase));
                 }
                 self.transport.wait_recv();
                 continue;
             };
-            if frame.hdr.seq == seq && matches!(frame.hdr.ty, MsgType::Status | MsgType::Data) {
-                if frame.hdr.ty == MsgType::Data {
-                    on_data(&frame)?;
-                    idle_waits = 0;
-                } else {
-                    let status = crate::envelope::read_status(&frame.payload)?;
-                    return if status == 0 {
-                        Ok(())
-                    } else {
-                        Err(UbusError::Status(status))
-                    };
-                }
+            if frame.hdr.ty == MsgType::Data {
+                on_data(&frame)?;
+                idle_waits = 0;
             } else {
-                let queued_bytes: usize = self.queued.iter().map(|f| f.payload.len()).sum();
-                if self.queued.len() >= 256 || queued_bytes + frame.payload.len() > MAX_MSG_LEN * 8
-                {
-                    return Err(UbusError::Malformed("pending message queue exceeded cap"));
-                }
-                self.queued.push_back(frame);
+                let status = crate::envelope::read_status(&frame.payload)?;
+                return if status == 0 {
+                    Ok(())
+                } else {
+                    Err(UbusError::Status(status))
+                };
             }
         }
     }
 
     pub fn recv_frame(&mut self) -> Result<Option<Frame>, UbusError> {
-        if let Some(frame) = self.queued.pop_front() {
+        let frame = if let Some(frame) = self.queued.pop_front() {
+            self.queued_bytes -= frame.payload.len();
+            Some(frame)
+        } else {
+            self.transport.recv()?
+        };
+        if let Some(frame) = &frame {
+            if frame.hdr.ty == MsgType::Status {
+                self.finish_invoke(frame.hdr.seq, frame.hdr.peer);
+            }
+        }
+        Ok(frame)
+    }
+
+    fn is_reply(frame: &Frame, seq: u16, peer: u32) -> bool {
+        frame.hdr.seq == seq
+            && frame.hdr.peer == peer
+            && matches!(frame.hdr.ty, MsgType::Status | MsgType::Data)
+    }
+
+    fn recv_matching(&mut self, seq: u16, peer: u32) -> Result<Option<Frame>, UbusError> {
+        if let Some(index) = self
+            .queued
+            .iter()
+            .position(|f| Self::is_reply(f, seq, peer))
+        {
+            let frame = self.queued.remove(index).expect("position exists");
+            self.queued_bytes -= frame.payload.len();
             return Ok(Some(frame));
         }
-        self.transport.recv()
+        while let Some(frame) = self.transport.recv()? {
+            if Self::is_reply(&frame, seq, peer) {
+                return Ok(Some(frame));
+            }
+            if self.queued.len() >= MAX_PENDING_MESSAGES
+                || self.queued_bytes.saturating_add(frame.payload.len()) > MAX_PENDING_BYTES
+            {
+                return Err(UbusError::Malformed("pending message queue exceeded cap"));
+            }
+            self.queued_bytes += frame.payload.len();
+            self.queued.push_back(frame);
+        }
+        Ok(None)
+    }
+
+    fn finish_invoke(&mut self, seq: u16, peer: u32) {
+        if let Some(index) = self
+            .pending_invokes
+            .iter()
+            .position(|entry| *entry == (seq, peer))
+        {
+            self.pending_invokes.swap_remove(index);
+        }
     }
 
     /// List all objects (`None`) or those matching an ubus lookup pattern.
@@ -276,52 +337,31 @@ impl<T: Transport> UbusClient<T> {
     }
 
     pub fn lookup(&mut self, object: &str) -> Result<u32, UbusError> {
-        let seq = self.next_seq();
-        self.transport
-            .send(&OutboundMsg::Lookup { obj_path: object }.into_frame(seq))?;
-        let mut found_id: Option<u32> = None;
+        let mut found_id = None;
         let mut data_frame_was_corrupt = false;
-        let mut idle_waits = 0u32;
-        loop {
-            let frame = match self.transport.recv()? {
-                Some(f) => f,
-                None => {
-                    idle_waits += 1;
-                    if idle_waits > IDLE_WAIT_BUDGET {
-                        return Err(UbusError::Timeout("lookup"));
-                    }
-                    self.transport.wait_recv();
-                    continue;
-                }
-            };
-            if frame.hdr.seq != seq {
-                continue;
-            }
-            match InboundMsg::parse(&frame)? {
+        let mut envelope = EnvBuilder::new();
+        envelope.push_str(UbusAttr::ObjPath, object);
+        self.request_with_phase(MsgType::Lookup, 0, envelope, "lookup", |frame| {
+            match InboundMsg::parse(frame)? {
                 InboundMsg::Data {
                     obj_id: Some(id), ..
-                } => {
-                    found_id = Some(id);
-                }
+                } => found_id = Some(id),
                 InboundMsg::Data { obj_id: None, .. } => data_frame_was_corrupt = true,
-                InboundMsg::Status { status, .. } => {
-                    if status != 0 {
-                        return Err(UbusError::Status(status));
-                    }
-                    if let Some(id) = found_id {
-                        return Ok(id);
-                    }
-                    return Err(UbusError::Malformed(if data_frame_was_corrupt {
-                        "LOOKUP DATA frame missing ObjId attr"
-                    } else {
-                        "LOOKUP succeeded without ObjId in DATA"
-                    }));
-                }
-                _ => continue,
+                _ => {}
             }
-        }
+            Ok(())
+        })?;
+        found_id.ok_or(UbusError::Malformed(if data_frame_was_corrupt {
+            "LOOKUP DATA frame missing ObjId attr"
+        } else {
+            "LOOKUP succeeded without ObjId in DATA"
+        }))
     }
 
+    /// Start an invocation and return its sequence for [`Self::recv_invoke_reply`].
+    /// At most 256 invocations may be outstanding. Receiving its STATUS through
+    /// [`Self::recv_frame`] also retires it. Raw transport reads bypass tracking;
+    /// use [`Self::forget_invoke`] after manually consuming those replies.
     pub fn send_invoke(
         &mut self,
         object_id: u32,
@@ -330,6 +370,9 @@ impl<T: Transport> UbusClient<T> {
     ) -> Result<u16, UbusError> {
         let obj_id =
             ObjId::new(object_id).ok_or(UbusError::Malformed("invoke target obj_id is zero"))?;
+        if self.pending_invokes.len() >= MAX_PENDING_INVOKES {
+            return Err(UbusError::Malformed("pending invocation limit exceeded"));
+        }
         let seq = self.next_seq();
         self.transport.send(
             &OutboundMsg::Invoke {
@@ -339,21 +382,47 @@ impl<T: Transport> UbusClient<T> {
             }
             .into_frame(seq),
         )?;
+        self.pending_invokes.push((seq, object_id));
         Ok(seq)
+    }
+
+    /// Release local tracking for a split-phase invocation. This does not
+    /// cancel the remote operation or remove buffered replies. Use it after
+    /// handling a reply through the raw transport, or to abandon a request.
+    pub fn forget_invoke(&mut self, seq: u16) -> bool {
+        if let Some(index) = self.pending_invokes.iter().position(|entry| entry.0 == seq) {
+            self.pending_invokes.swap_remove(index);
+            true
+        } else {
+            false
+        }
     }
 
     /// On STATUS=0 returns the *contents* of the handler's reply
     /// TABLE (outer wrapper stripped). Returns `Err(Status)` for
     /// non-zero STATUS and `Err(Malformed)` if the broker claimed
-    /// success but DATA was missing or unparseable.
+    /// success but DATA was missing or unparseable. `seq` must come from
+    /// [`Self::send_invoke`] on this client. Any result, including an error,
+    /// retires that invocation; other messages remain buffered in arrival order.
     pub fn recv_invoke_reply(&mut self, seq: u16) -> Result<Vec<u8>, UbusError> {
+        let peer = self
+            .pending_invokes
+            .iter()
+            .find(|entry| entry.0 == seq)
+            .map(|entry| entry.1)
+            .ok_or(UbusError::Malformed("invoke sequence is not pending"))?;
+        let result = self.wait_invoke_reply(seq, peer);
+        self.finish_invoke(seq, peer);
+        result
+    }
+
+    fn wait_invoke_reply(&mut self, seq: u16, peer: u32) -> Result<Vec<u8>, UbusError> {
         let mut data: Option<Vec<u8>> = None;
         let mut data_frame_was_corrupt = false;
         let mut idle_waits = 0u32;
         loop {
-            let frame = match self.transport.recv()? {
-                Some(f) if f.hdr.seq == seq => f,
-                Some(_) => continue,
+            let frame = match self.recv_matching(seq, peer)? {
+                Some(f) => f,
                 None => {
                     idle_waits += 1;
                     if idle_waits > IDLE_WAIT_BUDGET {
@@ -378,6 +447,7 @@ impl<T: Transport> UbusClient<T> {
                     let mut it = BlobIter::new(contents);
                     while it.try_next()?.is_some() {}
                     data = Some(contents.to_vec());
+                    idle_waits = 0;
                 }
                 InboundMsg::Data { data: None, .. } => data_frame_was_corrupt = true,
                 InboundMsg::Status { status, .. } => {
@@ -405,9 +475,18 @@ impl<T: Transport> UbusClient<T> {
     }
 
     fn next_seq(&mut self) -> u16 {
-        let s = self.seq;
-        self.seq = self.seq.wrapping_add(1);
-        s
+        // Both sets are bounded well below the 16-bit sequence space.
+        loop {
+            let seq = self.seq;
+            self.seq = self.seq.wrapping_add(1);
+            let busy = self.pending_invokes.iter().any(|entry| entry.0 == seq)
+                || self.queued.iter().any(|frame| {
+                    frame.hdr.seq == seq && matches!(frame.hdr.ty, MsgType::Data | MsgType::Status)
+                });
+            if !busy {
+                return seq;
+            }
+        }
     }
 }
 
@@ -423,6 +502,8 @@ impl<T: Transport> UbusClient<T> {
             seq: 1,
             peer_id: None,
             queued: VecDeque::new(),
+            queued_bytes: 0,
+            pending_invokes: Vec::new(),
         }
     }
 }
@@ -464,6 +545,182 @@ mod tests {
             Some(2)
         );
         assert_eq!(client.recv_frame().unwrap(), Some(event));
+    }
+
+    fn data_reply(seq: u16, peer: u32, value: i32) -> Frame {
+        let data = BlobMsgTable::build(|b| b.put_i32(Some("value"), value));
+        let mut env = EnvBuilder::new();
+        env.push_data(data.contents());
+        Frame::to_peer(MsgType::Data, seq, peer, env.finish())
+    }
+
+    fn status_reply(seq: u16, peer: u32, status: i32) -> Frame {
+        let mut env = EnvBuilder::new();
+        env.push_i32(UbusAttr::Status, status);
+        Frame::to_peer(MsgType::Status, seq, peer, env.finish())
+    }
+
+    #[test]
+    fn request_does_not_accept_a_matching_sequence_from_another_object() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let unrelated = status_reply(1, 99, 6);
+        peer.send(&unrelated).unwrap();
+        peer.send(&data_reply(1, 42, 7)).unwrap();
+        peer.send(&status_reply(1, 42, 0)).unwrap();
+        let replies = client
+            .invoke_many(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(client.recv_frame().unwrap(), Some(unrelated));
+    }
+
+    #[test]
+    fn lookup_preserves_an_event_with_the_same_sequence() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let event = OutboundMsg::Invoke {
+            obj_id: ObjId::new(77).unwrap(),
+            method: "event",
+            args: &BlobMsgTable::empty(),
+        }
+        .into_frame(1);
+        peer.send(&event).unwrap();
+        let mut env = EnvBuilder::new();
+        env.push_u32(UbusAttr::ObjId, 42);
+        peer.send(&Frame::to_broker(MsgType::Data, 1, env.finish()))
+            .unwrap();
+        peer.send(&status_reply(1, 0, 0)).unwrap();
+        assert_eq!(client.lookup("example").unwrap(), 42);
+        assert_eq!(client.recv_frame().unwrap(), Some(event));
+    }
+
+    #[test]
+    fn invoke_replies_can_be_received_in_reverse_order() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let first = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        let second = client
+            .send_invoke(43, "method", &BlobMsgTable::empty())
+            .unwrap();
+        for (seq, object, value) in [(first, 42, 1), (second, 43, 2)] {
+            peer.send(&data_reply(seq, object, value)).unwrap();
+            peer.send(&status_reply(seq, object, 0)).unwrap();
+        }
+        for (seq, expected) in [(second, 2), (first, 1)] {
+            let bytes = client.recv_invoke_reply(seq).unwrap();
+            assert_eq!(
+                crate::blobmsg::lookup(&bytes, "value").unwrap().as_i32(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn invocation_target_is_checked_and_raw_status_retires_only_its_request() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let seq = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        let unrelated = status_reply(seq, 99, 0);
+        peer.send(&unrelated).unwrap();
+        assert_eq!(client.recv_frame().unwrap(), Some(unrelated));
+        peer.send(&data_reply(seq, 99, 99)).unwrap();
+        peer.send(&data_reply(seq, 42, 7)).unwrap();
+        peer.send(&status_reply(seq, 42, 0)).unwrap();
+        let bytes = client.recv_invoke_reply(seq).unwrap();
+        assert_eq!(
+            crate::blobmsg::lookup(&bytes, "value").unwrap().as_i32(),
+            Some(7)
+        );
+        assert_eq!(client.recv_frame().unwrap(), Some(data_reply(seq, 99, 99)));
+        assert!(matches!(
+            client.recv_invoke_reply(seq),
+            Err(UbusError::Malformed("invoke sequence is not pending"))
+        ));
+    }
+
+    #[test]
+    fn pending_invocations_are_bounded_and_raw_completion_frees_a_slot() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let first = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        for _ in 1..MAX_PENDING_INVOKES {
+            client
+                .send_invoke(42, "method", &BlobMsgTable::empty())
+                .unwrap();
+        }
+        assert!(matches!(
+            client.send_invoke(42, "method", &BlobMsgTable::empty()),
+            Err(UbusError::Malformed("pending invocation limit exceeded"))
+        ));
+        for _ in 0..MAX_PENDING_INVOKES {
+            assert!(peer.recv().unwrap().is_some());
+        }
+        assert!(peer.recv().unwrap().is_none(), "rejected call was not sent");
+        peer.send(&status_reply(first, 42, 0)).unwrap();
+        assert!(client.recv_frame().unwrap().is_some());
+        client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+    }
+
+    #[test]
+    fn receive_errors_retire_invocations_and_raw_users_can_release_tracking() {
+        let (transport, _peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let seq = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        assert!(matches!(
+            client.recv_invoke_reply(seq),
+            Err(UbusError::Timeout("invoke"))
+        ));
+        assert!(!client.forget_invoke(seq));
+        let seq = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        assert!(client.forget_invoke(seq));
+        assert!(!client.forget_invoke(seq));
+    }
+
+    #[test]
+    fn sequence_wrap_skips_outstanding_and_buffered_replies() {
+        let (transport, mut peer) = MockTransport::pair();
+        let mut client = UbusClient::without_hello(transport);
+        let first = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        assert_eq!(first, 1);
+        // Buffer a reply with seq=2 while completing a request with seq=3.
+        client.seq = 3;
+        peer.send(&status_reply(2, 99, 0)).unwrap();
+        peer.send(&status_reply(3, 0, 0)).unwrap();
+        client.ping().unwrap();
+        client.seq = u16::MAX;
+        assert_eq!(
+            client
+                .send_invoke(42, "method", &BlobMsgTable::empty())
+                .unwrap(),
+            u16::MAX
+        );
+        assert_eq!(
+            client
+                .send_invoke(42, "method", &BlobMsgTable::empty())
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            client
+                .send_invoke(42, "method", &BlobMsgTable::empty())
+                .unwrap(),
+            3
+        );
     }
 
     /// One idle read between each complete frame models a slowly delivered
@@ -517,6 +774,26 @@ mod tests {
     }
 
     #[test]
+    fn split_phase_invoke_idle_budget_resets_on_valid_data() {
+        let mut transport = IntermittentReplies {
+            frames: (0..=IDLE_WAIT_BUDGET)
+                .map(|n| data_reply(1, 42, n as i32))
+                .collect(),
+            idle: false,
+        };
+        transport.frames.push_back(status_reply(1, 42, 0));
+        let mut client = UbusClient::without_hello(transport);
+        let seq = client
+            .send_invoke(42, "method", &BlobMsgTable::empty())
+            .unwrap();
+        let data = client.recv_invoke_reply(seq).unwrap();
+        assert_eq!(
+            crate::blobmsg::lookup(&data, "value").unwrap().as_i32(),
+            Some(IDLE_WAIT_BUDGET as i32)
+        );
+    }
+
+    #[test]
     fn request_still_times_out_on_silence_or_unrelated_data() {
         for seq in [1, 99] {
             let mut client = UbusClient::without_hello(intermittent_data(seq));
@@ -562,13 +839,13 @@ mod tests {
         let mut bad = EnvBuilder::new();
         bad.push_u32(UbusAttr::ObjId, 0);
         srv_t
-            .send(&Frame::to_peer(MsgType::Data, seq, 0, bad.finish()))
+            .send(&Frame::to_peer(MsgType::Data, seq, 7, bad.finish()))
             .unwrap();
         // Then STATUS=0 — broker claims success.
         let mut ok = EnvBuilder::new();
         ok.push_i32(UbusAttr::Status, 0);
         srv_t
-            .send(&Frame::to_peer(MsgType::Status, seq, 0, ok.finish()))
+            .send(&Frame::to_peer(MsgType::Status, seq, 7, ok.finish()))
             .unwrap();
         let err = cli.recv_invoke_reply(seq).expect_err("must surface");
         assert!(matches!(err, UbusError::Malformed(_)), "got {err:?}");

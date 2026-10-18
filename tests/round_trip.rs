@@ -80,7 +80,7 @@ fn run_fake_broker_register(broker: &mut MockTransport, object_id: u32, peer_id:
         .send(&Frame::to_peer(
             MsgType::Data,
             add.hdr.seq,
-            peer_id,
+            add.hdr.peer,
             data_env.finish(),
         ))
         .unwrap();
@@ -91,7 +91,7 @@ fn run_fake_broker_register(broker: &mut MockTransport, object_id: u32, peer_id:
         .send(&Frame::to_peer(
             MsgType::Status,
             add.hdr.seq,
-            peer_id,
+            add.hdr.peer,
             status_env.finish(),
         ))
         .unwrap();
@@ -140,7 +140,7 @@ fn register_completes_via_status_only() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 add.hdr.seq,
-                99,
+                add.hdr.peer,
                 env.finish(),
             ))
             .unwrap();
@@ -166,7 +166,7 @@ fn register_returns_status_error_on_nonzero() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 add.hdr.seq,
-                5,
+                add.hdr.peer,
                 env.finish(),
             ))
             .unwrap();
@@ -221,7 +221,7 @@ fn register_rejects_status_zero_without_obj_id() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 add.hdr.seq,
-                5,
+                add.hdr.peer,
                 env.finish(),
             ))
             .unwrap();
@@ -269,7 +269,7 @@ fn lookup_returns_obj_id_from_data_then_status() {
             .send(&Frame::to_peer(
                 MsgType::Data,
                 lookup.hdr.seq,
-                17,
+                lookup.hdr.peer,
                 data_env.finish(),
             ))
             .unwrap();
@@ -280,7 +280,7 @@ fn lookup_returns_obj_id_from_data_then_status() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 lookup.hdr.seq,
-                17,
+                lookup.hdr.peer,
                 status_env.finish(),
             ))
             .unwrap();
@@ -308,7 +308,7 @@ fn lookup_surfaces_nonzero_status() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 lookup.hdr.seq,
-                17,
+                lookup.hdr.peer,
                 status_env.finish(),
             ))
             .unwrap();
@@ -345,7 +345,7 @@ fn register_signature_includes_method_names() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 add.hdr.seq,
-                1,
+                add.hdr.peer,
                 env.finish(),
             ))
             .unwrap();
@@ -381,7 +381,7 @@ fn unregister_emits_remove_object_for_registered_id() {
             .send(&Frame::to_peer(
                 MsgType::Status,
                 add.hdr.seq,
-                4,
+                add.hdr.peer,
                 env.finish(),
             ))
             .unwrap();

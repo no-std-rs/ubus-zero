@@ -50,6 +50,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Require broker-origin replies for provider registration and acknowledged removal.
+- Match client replies by both sequence and object, preserve interleaved events
+  and invocation replies, and avoid reusing live sequences across wraparound.
+- Bound outstanding split-phase client invocations to 256 and retire them on
+  completion or receive errors; raw transport reads bypass this tracking.
 - Honor shared object-type IDs (including pathless registrations), release the
   signature after the final object is removed.
 - Preserve sibling-subscription cleanup after one subscriber object unsubscribes.
