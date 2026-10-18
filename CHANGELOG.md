@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.1](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.0...ubus-zero-v0.4.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* preserve empty keys in high-level JSON conversion ([#38](https://github.com/no-std-rs/ubus-zero/issues/38)) ([d11c9ee](https://github.com/no-std-rs/ubus-zero/commit/d11c9ee56dcd2fa78a1ef7313ce97b9f6f7541ba))
+* reject oversized replies before provider transmission ([#37](https://github.com/no-std-rs/ubus-zero/issues/37)) ([d2f6942](https://github.com/no-std-rs/ubus-zero/commit/d2f6942dea490e9dbe33c4285c4f3d8d154d04ab))
+* apply envelope policy to typed inbound messages ([#36](https://github.com/no-std-rs/ubus-zero/issues/36)) ([b0bd286](https://github.com/no-std-rs/ubus-zero/commit/b0bd286f2dc1ced86b6fa66e387fdeb695c0d44b))
+* retire object routes during path replacement ([#35](https://github.com/no-std-rs/ubus-zero/issues/35)) ([7cee88e](https://github.com/no-std-rs/ubus-zero/commit/7cee88e999721346ffe0147f1797738473185879))
+* reject I/O after an abandoned partial Unix send ([#34](https://github.com/no-std-rs/ubus-zero/issues/34)) ([d497282](https://github.com/no-std-rs/ubus-zero/commit/d497282f3d00a96d8d58289ada2a4192c6ac88b1))
+
 All notable changes to `ubus-zero` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
