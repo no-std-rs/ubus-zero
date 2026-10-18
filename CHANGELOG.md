@@ -50,6 +50,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Honor shared object-type IDs (including pathless registrations), release the
+  signature after the final object is removed.
+- Preserve sibling-subscription cleanup after one subscriber object unsubscribes.
 - Decode the exact outer ubus length without waiting for stream padding, and
   preserve the next frame and descriptor after an unaligned outer blob.
 - Allocate per-peer byte buffers lazily and recycle empty receive/transmit

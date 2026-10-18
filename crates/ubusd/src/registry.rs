@@ -29,6 +29,7 @@
 
 use core::num::NonZeroU32;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Weak};
 
 use crate::broker::BrokerError;
 use crate::peer::Peer;
@@ -116,7 +117,7 @@ impl ObjectType {
 struct ObjectEntry {
     owner: PeerId,
     path: Option<String>,
-    obj_type: Option<ObjectType>,
+    obj_type: Option<Arc<ObjectType>>,
 }
 
 pub struct PeerTable {
@@ -221,6 +222,8 @@ pub struct ObjectRegistry {
     /// Live named registrations per owner. Monotonic IDs preserve upstream's
     /// newest-first order without retaining deleted registration history.
     named_by_owner: HashMap<PeerId, BTreeSet<ObjectId>>,
+    // Weak entries index live types without retaining removed signatures.
+    types: HashMap<ObjectId, Weak<ObjectType>>,
     /// Crate-visible only so the routing-test for AddObject exhaustion
     /// can fast-forward the allocator to its overflow boundary; not
     /// part of any public API.
@@ -239,13 +242,14 @@ impl ObjectRegistry {
             by_id: HashMap::new(),
             by_path: BTreeMap::new(),
             named_by_owner: HashMap::new(),
+            types: HashMap::new(),
             next_id: FIRST_OBJ_ID.0,
         }
     }
 
     /// Insert `(path, owner)`. Replaces any prior registration at
-    /// the same path (libubus does the same — last writer wins,
-    /// quietly). Returns the new obj-id and, when a prior
+    /// the same path (the Rust broker's documented last-writer-wins
+    /// extension). Returns the new obj-id and, when a prior
     /// registration existed, `(prev_obj_id, prev_owner_peer_id)` so
     /// the caller can purge the displaced owner's `Peer::owned` list
     /// and any subscriber entries keyed at `prev_obj_id`.
@@ -255,7 +259,17 @@ impl ObjectRegistry {
         owner: PeerId,
         signature: Option<Vec<u8>>,
     ) -> Result<(ObjectId, Option<(ObjectId, PeerId)>), BrokerError> {
-        let (id, obj_type) = self.allocate_object_and_type(signature)?;
+        self.insert_with_type(path, owner, signature, None)
+    }
+
+    pub(crate) fn insert_with_type(
+        &mut self,
+        path: String,
+        owner: PeerId,
+        signature: Option<Vec<u8>>,
+        requested_type: Option<u32>,
+    ) -> Result<(ObjectId, Option<(ObjectId, PeerId)>), BrokerError> {
+        let (id, obj_type) = self.allocate_object_and_type(signature, requested_type)?;
         let replaced = self.by_path.get(&path).copied().map(|previous| {
             let owner = self.by_id[&previous].owner;
             self.remove(previous);
@@ -279,7 +293,16 @@ impl ObjectRegistry {
     /// but LOOKUP must never list it because there is no name to
     /// publish.
     pub fn insert_anonymous(&mut self, owner: PeerId) -> Result<ObjectId, BrokerError> {
-        let (id, obj_type) = self.allocate_object_and_type(None)?;
+        self.insert_anonymous_with_type(owner, None, None)
+    }
+
+    pub(crate) fn insert_anonymous_with_type(
+        &mut self,
+        owner: PeerId,
+        signature: Option<Vec<u8>>,
+        requested_type: Option<u32>,
+    ) -> Result<ObjectId, BrokerError> {
+        let (id, obj_type) = self.allocate_object_and_type(signature, requested_type)?;
         self.by_id.insert(
             id,
             ObjectEntry {
@@ -294,12 +317,20 @@ impl ObjectRegistry {
     fn allocate_object_and_type(
         &mut self,
         signature: Option<Vec<u8>>,
-    ) -> Result<(ObjectId, Option<ObjectType>), BrokerError> {
+        requested_type: Option<u32>,
+    ) -> Result<(ObjectId, Option<Arc<ObjectType>>), BrokerError> {
         let obj_id = ObjectId(self.next_id);
         let after_obj = self
             .next_id
             .checked_add(1)
             .ok_or(BrokerError::ObjectIdExhausted)?;
+        if let Some(requested) = requested_type {
+            let obj_type = ObjectId::new(requested)
+                .and_then(|id| self.types.get(&id))
+                .and_then(Weak::upgrade);
+            self.next_id = after_obj;
+            return Ok((obj_id, obj_type));
+        }
         let Some(signature) = signature else {
             self.next_id = after_obj;
             return Ok((obj_id, None));
@@ -309,13 +340,12 @@ impl ObjectRegistry {
             .checked_add(1)
             .ok_or(BrokerError::ObjectIdExhausted)?;
         self.next_id = after_type;
-        Ok((
-            obj_id,
-            Some(ObjectType {
-                id: type_id,
-                signature,
-            }),
-        ))
+        let obj_type = Arc::new(ObjectType {
+            id: type_id,
+            signature,
+        });
+        self.types.insert(type_id, Arc::downgrade(&obj_type));
+        Ok((obj_id, Some(obj_type)))
     }
 
     /// Look up by exact path. Prefix (trailing-`*`) lookup is handled
@@ -349,7 +379,7 @@ impl ObjectRegistry {
     /// `ubusd`'s AVL-walk emission order.
     pub fn iter_typed_paths(&self) -> impl Iterator<Item = (ObjectId, &str, &ObjectType)> {
         self.by_path.iter().filter_map(|(path, id)| {
-            Some((*id, path.as_str(), self.by_id.get(id)?.obj_type.as_ref()?))
+            Some((*id, path.as_str(), self.by_id.get(id)?.obj_type.as_deref()?))
         })
     }
 
@@ -365,7 +395,7 @@ impl ObjectRegistry {
             ))
             .take_while(move |(path, _)| path.starts_with(prefix))
             .filter_map(|(path, id)| {
-                Some((*id, path.as_str(), self.by_id.get(id)?.obj_type.as_ref()?))
+                Some((*id, path.as_str(), self.by_id.get(id)?.obj_type.as_deref()?))
             })
     }
 
@@ -375,7 +405,7 @@ impl ObjectRegistry {
     }
 
     pub fn type_of(&self, obj_id: ObjectId) -> Option<&ObjectType> {
-        self.by_id.get(&obj_id)?.obj_type.as_ref()
+        self.by_id.get(&obj_id)?.obj_type.as_deref()
     }
 
     /// Path of a named object, or `None` for anonymous objects. Used to
@@ -407,6 +437,11 @@ impl ObjectRegistry {
         let Some(entry) = self.by_id.remove(&obj_id) else {
             return false;
         };
+        if let Some(obj_type) = &entry.obj_type {
+            if Arc::strong_count(obj_type) == 1 {
+                self.types.remove(&obj_type.id);
+            }
+        }
         if let Some(path) = entry.path {
             self.by_path.remove(&path);
             if let Some(ids) = self.named_by_owner.get_mut(&entry.owner) {
@@ -779,6 +814,26 @@ impl EventRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_type_index_is_reclaimed_after_each_registration_cycle() {
+        let mut objects = ObjectRegistry::new();
+        let owner = PeerId::new(1025).unwrap();
+        for _ in 0..1000 {
+            let (first, _) = objects
+                .insert("first".into(), owner, Some(Vec::new()))
+                .unwrap();
+            let type_id = objects.type_of(first).unwrap().id().get();
+            let (second, _) = objects
+                .insert_with_type("second".into(), owner, None, Some(type_id))
+                .unwrap();
+            assert!(objects.remove(first));
+            assert_eq!(objects.type_of(second).unwrap().id().get(), type_id);
+            assert_eq!(objects.types.len(), 1);
+            assert!(objects.remove(second));
+            assert!(objects.types.is_empty());
+        }
+    }
 
     fn pid(n: u32) -> PeerId {
         PeerId::new(n).unwrap()
