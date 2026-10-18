@@ -163,6 +163,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Differential compatibility suite backed by a private Rust broker and pinned
   OpenWrt reference builds.
 
-[Unreleased]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.0...HEAD
+[Unreleased]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.1...HEAD
 [0.2.0]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.1.0...ubus-zero-v0.2.0
 [0.1.0]: https://github.com/no-std-rs/ubus-zero/releases/tag/ubus-zero-v0.1.0
