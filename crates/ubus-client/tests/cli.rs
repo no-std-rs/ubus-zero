@@ -464,6 +464,41 @@ fn encoded_oversize_handler_reply_keeps_the_provider_running() {
 }
 
 #[test]
+fn shell_provider_round_trips_empty_json_keys() {
+    brokers("cli empty JSON keys", |socket| {
+        let provider = cli(
+            socket,
+            &[
+                "-n",
+                "3",
+                "serve",
+                "example.empty-keys",
+                "echo",
+                "--",
+                "cat",
+            ],
+        )
+        .spawn()
+        .unwrap();
+        success(socket, &["-t", "3", "wait_for", "example.empty-keys"]);
+        for value in [
+            json!({"": 1}),
+            json!({"outer": {"": [null, true, 7, 1.25, "text"]}}),
+            json!({"items": [{"": {"": false}}, 2]}),
+        ] {
+            assert_eq!(
+                success(
+                    socket,
+                    &["call", "example.empty-keys", "echo", &value.to_string()]
+                ),
+                value
+            );
+        }
+        assert!(wait(provider).status.success());
+    });
+}
+
+#[test]
 fn real_rpcd_sessions_and_error_statuses() {
     brokers("cli rpcd", |socket| {
         let Some(rpcd) = RpcdHarness::start(std::path::Path::new(socket), &[]).unwrap() else {

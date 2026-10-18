@@ -3,16 +3,21 @@
 //! Enabled by `json`; this module still requires only `alloc`. Integer encoding
 //! follows libblobmsg_json: signed 64-bit values, with oversized unsigned values
 //! clamped to `i64::MAX`. JSON null is an empty UNSPEC attribute.
+//! Empty object keys round-trip here; the low-level C-compatible text
+//! formatter retains libblobmsg_json's omission of empty names.
 
 use alloc::format;
 use serde_json::Value;
 
-use crate::{blobmsg::to_json, BlobBuilder, BlobIter, BlobMsgTable, BlobValue, UbusError};
+use crate::{
+    blobmsg::to_json_preserving_empty_keys, BlobBuilder, BlobIter, BlobMsgTable, BlobValue,
+    UbusError,
+};
 
 /// Decode a table's contents, validating every nested attribute first.
 pub fn blobmsg_to_json(buf: &[u8]) -> Result<Value, UbusError> {
     validate_blobmsg(buf, 0)?;
-    serde_json::from_str(&to_json(buf, true))
+    serde_json::from_str(&to_json_preserving_empty_keys(buf))
         .map_err(|e| UbusError::Method(format!("blobmsg JSON decode failed: {e}")))
 }
 
@@ -116,6 +121,36 @@ mod tests {
         let table = json_to_blobmsg(&value).unwrap();
         assert_eq!(blobmsg_to_json(table.contents()).unwrap(), value);
         assert_eq!(blobmsg_to_json(&[]).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn empty_object_keys_round_trip_without_naming_array_elements() {
+        for value in [
+            json!({"": 1}),
+            json!({"outer": {"": 1}}),
+            json!({"": {"": [null, true, 7, 1.25, "text"]}}),
+            json!({"items": [{"": 1}, 2, {"nested": {"": false}}]}),
+        ] {
+            let table = json_to_blobmsg(&value).unwrap();
+            assert_eq!(blobmsg_to_json(table.contents()).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn empty_key_support_preserves_low_level_c_formatting() {
+        let table = json_to_blobmsg(&json!({"": 1})).unwrap();
+        assert_eq!(crate::blobmsg::to_json(table.contents(), true), "{1}");
+        assert_eq!(blobmsg_to_json(table.contents()).unwrap(), json!({"": 1}));
+    }
+
+    #[test]
+    fn high_level_json_still_rejects_named_array_elements() {
+        let table = BlobMsgTable::build(|b| {
+            b.open_array(Some("items"));
+            b.put_i32(Some("named"), 1);
+            b.close_array();
+        });
+        assert!(blobmsg_to_json(table.contents()).is_err());
     }
 
     #[test]
