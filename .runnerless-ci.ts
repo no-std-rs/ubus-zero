@@ -52,14 +52,26 @@ export function run(): void {
   }
   if (name != "workflow_run"
     || details.get("action").string() != "completed"
-    || details.get("workflowPath").string() != ".github/workflows/publish-release.yml"
-    || details.get("conclusion").string() != "success") return;
+    || details.get("workflowPath").string() != ".github/workflows/publish-release.yml") return;
+  if (details.get("conclusion").string() != "success") {
+    checks.report("Crate publishing trigger", false, "The release-asset workflow did not succeed.");
+    return;
+  }
   const tag = details.get("headRef").string();
-  if (!tag.startsWith("ubus-zero-v")) return;
+  if (!tag.startsWith("ubus-zero-v")) {
+    checks.report("Crate publishing trigger", false, "The release-asset workflow did not run on a ubus-zero release tag.");
+    return;
+  }
   // Runnerless pins "head" to workflow_run.head_sha, not the current main tip.
   const version = repo.readText("version.txt", "head").trim();
-  if (tag != "ubus-zero-v" + version) return;
-  if (!packages.releasePublished(tag, version)) return;
+  if (tag != "ubus-zero-v" + version) {
+    checks.report("Crate publishing trigger", false, "The workflow tag does not match version.txt at its pinned revision.");
+    return;
+  }
+  if (!packages.releasePublished(tag, version)) {
+    checks.report("Crate publishing trigger", false, "No stable published release matches the workflow tag and commit.");
+    return;
+  }
   const request = new RegistryPublishRequest(tag, version)
     .add("ubus-zero", "ubus-zero-" + version + ".cargo-upload");
   // Keep retries of the initial library-only release valid. Package selection
@@ -69,4 +81,6 @@ export function run(): void {
       .add("ubus-client", "ubus-client-" + version + ".cargo-upload");
   }
   packages.crates(new OperationRequest("publish-ubus-zero"), request);
+  checks.report("Crate publishing trigger", true,
+    "Publication requested for " + tag + ". See crates-ubus-zero for the registry outcome.");
 }

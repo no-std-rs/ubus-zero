@@ -1,0 +1,6 @@
+--- a/libubus-req.c
++++ b/libubus-req.c
+@@ -205,3 +205 @@ void ubus_complete_deferred_request(struct ubus_context *ctx, struct ubus_request_data *req, int ret)
+-	if (req->fd >= 0)
+-		close(req->fd);
+ }

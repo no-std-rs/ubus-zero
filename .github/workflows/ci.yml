@@ -112,7 +112,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .dep/bin
-          key: openwrt-${{ runner.os }}-${{ hashFiles('tools/ubusd-builder/Dockerfile', 'tools/ubusd-builder/build.sh') }}
+          key: openwrt-${{ runner.os }}-${{ hashFiles('tools/ubusd-builder/**') }}
 
       - name: Set up Docker Buildx
         if: steps.reference-cache.outputs.cache-hit != 'true'
