@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.3.0...ubus-zero-v0.4.0) (2026-10-18)
+
+
+### Features
+
+* bound broker memory and add allocator-free submission ([#29](https://github.com/no-std-rs/ubus-zero/issues/29)) ([227d7b4](https://github.com/no-std-rs/ubus-zero/commit/227d7b48a63609b6ec02a1f402a14c285e1028f8))
+
+### Bug Fixes
+
+* return standard ubus provider error statuses ([#33](https://github.com/no-std-rs/ubus-zero/issues/33)) ([2247961](https://github.com/no-std-rs/ubus-zero/commit/2247961f5312031c1e54170b5b2c0b867da47842))
+* match reply origins and preserve interleaved messages ([#32](https://github.com/no-std-rs/ubus-zero/issues/32)) ([3d217a5](https://github.com/no-std-rs/ubus-zero/commit/3d217a5762bfea63c2f42e78d8037c561079b77f))
+* preserve shared types and sibling subscription cleanup ([#31](https://github.com/no-std-rs/ubus-zero/issues/31)) ([0583c8f](https://github.com/no-std-rs/ubus-zero/commit/0583c8fbe5f8fbd26a7283311a9f6f283830ac37))
+* honor exact outer ubus frame lengths ([#30](https://github.com/no-std-rs/ubus-zero/issues/30)) ([8a7b95e](https://github.com/no-std-rs/ubus-zero/commit/8a7b95e4f93b718e6c4173b3c6f2a7589a8100d2))
+* preserve ubus parity and remove broker bottlenecks ([#28](https://github.com/no-std-rs/ubus-zero/issues/28)) ([1200873](https://github.com/no-std-rs/ubus-zero/commit/120087321b16a55bccf67c28b6aa710e316dddb3))
+
+### Performance Improvements
+
+* reduce large-message broker receive overhead ([#26](https://github.com/no-std-rs/ubus-zero/issues/26)) ([6030e3b](https://github.com/no-std-rs/ubus-zero/commit/6030e3bf7e9532ce7ba32553db9bdd803a27c439))
+
 ## [0.3.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...ubus-zero-v0.3.0) (2026-10-16)
 
 
