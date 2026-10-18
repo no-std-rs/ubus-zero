@@ -12,9 +12,11 @@ use crate::msg::{InboundMsg, OutboundMsg};
 use crate::transport::Transport;
 use crate::wire::{Frame, MsgType, ObjId, HELLO_NON_HELLO_BUDGET, IDLE_WAIT_BUDGET, MAX_MSG_LEN};
 
-const MAX_PENDING_MESSAGES: usize = 256;
-const MAX_PENDING_BYTES: usize = MAX_MSG_LEN * 8;
 const MAX_PENDING_INVOKES: usize = 256;
+// DATA + STATUS for each outstanding invocation, plus the original
+// background-message headroom. The independent byte cap still applies.
+const MAX_PENDING_MESSAGES: usize = 2 * MAX_PENDING_INVOKES + 256;
+const MAX_PENDING_BYTES: usize = MAX_MSG_LEN * 8;
 
 /// An object returned by a broker lookup, including its method signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,7 +110,8 @@ impl<T: Transport> UbusClient<T> {
     /// Perform a broker request, delivering every DATA reply to the callback.
     /// Asynchronous messages arriving during the request are retained for
     /// [`Self::recv_frame`]. Accepted DATA resets the idle-wait budget; unrelated
-    /// traffic does not. Transports supply the real-time deadline.
+    /// traffic does not. The shared pending queue holds at most 768 frames
+    /// and 8 MiB of payload. Transports supply the real-time deadline.
     pub fn request(
         &mut self,
         ty: MsgType,
@@ -644,6 +647,47 @@ mod tests {
     }
 
     #[test]
+    fn the_full_invocation_window_can_complete_in_reverse_order() {
+        for background in [0, 256] {
+            let (transport, mut peer) = MockTransport::pair();
+            let mut client = UbusClient::without_hello(transport);
+            let seqs: Vec<_> = (0..MAX_PENDING_INVOKES)
+                .map(|_| {
+                    client
+                        .send_invoke(42, "method", &BlobMsgTable::empty())
+                        .unwrap()
+                })
+                .collect();
+            let event = Frame::to_broker(MsgType::Notify, 0, EnvBuilder::new().finish());
+            for _ in 0..background {
+                peer.send(&event).unwrap();
+            }
+            for (n, seq) in seqs.iter().enumerate() {
+                peer.send(&data_reply(*seq, 42, n as i32)).unwrap();
+                peer.send(&status_reply(*seq, 42, 0)).unwrap();
+            }
+            if background != 0 {
+                // An ordinary synchronous request can run while the entire
+                // invocation window and background traffic are buffered.
+                peer.send(&status_reply(MAX_PENDING_INVOKES as u16 + 1, 0, 0))
+                    .unwrap();
+                client.ping().unwrap();
+            }
+            for (n, seq) in seqs.iter().enumerate().rev() {
+                let data = client.recv_invoke_reply(*seq).unwrap();
+                assert_eq!(
+                    crate::blobmsg::lookup(&data, "value").unwrap().as_i32(),
+                    Some(n as i32)
+                );
+            }
+            for _ in 0..background {
+                assert_eq!(client.recv_frame().unwrap(), Some(event.clone()));
+            }
+            assert!(client.recv_frame().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn pending_invocations_are_bounded_and_raw_completion_frees_a_slot() {
         let (transport, mut peer) = MockTransport::pair();
         let mut client = UbusClient::without_hello(transport);
@@ -808,7 +852,7 @@ mod tests {
     fn pending_queue_is_bounded() {
         let (transport, mut peer) = MockTransport::pair();
         let mut client = UbusClient::without_hello(transport);
-        for _ in 0..257 {
+        for _ in 0..=MAX_PENDING_MESSAGES {
             peer.send(&Frame::to_peer(
                 MsgType::Notify,
                 99,
