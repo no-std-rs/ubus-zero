@@ -564,6 +564,31 @@ mod tests {
     }
 
     #[test]
+    fn invoke_and_invoke_many_accept_the_same_policy_valid_status() {
+        for invalid in [&[6][..], &[0, 0, 0, 6, 0]] {
+            let (transport, mut peer) = MockTransport::pair();
+            let mut client = UbusClient::without_hello(transport);
+            let mut envelope = EnvBuilder::new();
+            envelope.push_i32(UbusAttr::Status, 0);
+            envelope.push_bytes_id(UbusAttr::Status as u8, invalid);
+            let payload = envelope.finish();
+            peer.send(&Frame::to_peer(MsgType::Status, 1, 42, payload.clone()))
+                .unwrap();
+            assert_eq!(
+                client.invoke(42, "method", &BlobMsgTable::empty()).unwrap(),
+                Vec::<u8>::new()
+            );
+            assert!(!client.forget_invoke(1));
+            peer.send(&Frame::to_peer(MsgType::Status, 2, 42, payload))
+                .unwrap();
+            assert!(client
+                .invoke_many(42, "method", &BlobMsgTable::empty())
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
     fn request_does_not_accept_a_matching_sequence_from_another_object() {
         let (transport, mut peer) = MockTransport::pair();
         let mut client = UbusClient::without_hello(transport);

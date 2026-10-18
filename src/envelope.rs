@@ -323,7 +323,7 @@ pub fn find(frame_payload: &[u8], id: UbusAttr) -> Option<EnvAttr<'_>> {
     iter_attrs(inner).filter(|a| policy_accepts(a, id)).last()
 }
 
-fn policy_accepts(attr: &EnvAttr<'_>, id: UbusAttr) -> bool {
+pub(crate) fn policy_accepts(attr: &EnvAttr<'_>, id: UbusAttr) -> bool {
     if attr.id != id as u8 {
         return false;
     }
