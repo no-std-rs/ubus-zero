@@ -1,24 +1,30 @@
 # Changelog
 
-## [0.3.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...ubus-zero-v0.3.0) (2026-10-16)
-
-
-### Features
-
-* publish C3 firmware and add a GitHub Pages USB flasher ([#21](https://github.com/no-std-rs/ubus-zero/issues/21)) ([89422c0](https://github.com/no-std-rs/ubus-zero/commit/89422c0c9e36b25e2de9bd9279e9167f304f4177))
-* add no_std ESP32-C3 OpenWrt router dashboard ([#20](https://github.com/no-std-rs/ubus-zero/issues/20)) ([8babfbb](https://github.com/no-std-rs/ubus-zero/commit/8babfbbe3b341250989affa1097ad83c27b2db92))
-
-### Bug Fixes
-
-* **ci:** isolate Cargo artifacts for concurrent fault profiles ([#23](https://github.com/no-std-rs/ubus-zero/issues/23)) ([051b507](https://github.com/no-std-rs/ubus-zero/commit/051b507b5a41a7207385381e498202516bb8094d))
-* **release:** capture released versions without mirroring their crates.io entries ([#18](https://github.com/no-std-rs/ubus-zero/issues/18)) ([36109d2](https://github.com/no-std-rs/ubus-zero/commit/36109d260675c6d0af0b680ab15944e856519bd2))
-
 All notable changes to `ubus-zero` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.3.0...ubus-zero-v0.4.0) (2026-10-18)
+
+
+### Features
+
+* bound broker memory and add allocator-free submission ([#29](https://github.com/no-std-rs/ubus-zero/issues/29)) ([227d7b4](https://github.com/no-std-rs/ubus-zero/commit/227d7b48a63609b6ec02a1f402a14c285e1028f8))
+
+### Bug Fixes
+
+* return standard ubus provider error statuses ([#33](https://github.com/no-std-rs/ubus-zero/issues/33)) ([2247961](https://github.com/no-std-rs/ubus-zero/commit/2247961f5312031c1e54170b5b2c0b867da47842))
+* match reply origins and preserve interleaved messages ([#32](https://github.com/no-std-rs/ubus-zero/issues/32)) ([3d217a5](https://github.com/no-std-rs/ubus-zero/commit/3d217a5762bfea63c2f42e78d8037c561079b77f))
+* preserve shared types and sibling subscription cleanup ([#31](https://github.com/no-std-rs/ubus-zero/issues/31)) ([0583c8f](https://github.com/no-std-rs/ubus-zero/commit/0583c8fbe5f8fbd26a7283311a9f6f283830ac37))
+* honor exact outer ubus frame lengths ([#30](https://github.com/no-std-rs/ubus-zero/issues/30)) ([8a7b95e](https://github.com/no-std-rs/ubus-zero/commit/8a7b95e4f93b718e6c4173b3c6f2a7589a8100d2))
+* preserve ubus parity and remove broker bottlenecks ([#28](https://github.com/no-std-rs/ubus-zero/issues/28)) ([1200873](https://github.com/no-std-rs/ubus-zero/commit/120087321b16a55bccf67c28b6aa710e316dddb3))
+
+### Performance Improvements
+
+* reduce large-message broker receive overhead ([#26](https://github.com/no-std-rs/ubus-zero/issues/26)) ([6030e3b](https://github.com/no-std-rs/ubus-zero/commit/6030e3bf7e9532ce7ba32553db9bdd803a27c439))
 
 ### Added
 
@@ -36,17 +42,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   same-machine comparisons of C, baseline Rust and current Rust using a Git ref.
 - Reproducible Rust/OpenWrt broker benchmarks with verified protocol workloads,
   latency percentiles, throughput, raw samples and standalone comparison reports.
-
-- Public ESP32-C3 factory firmware builds, Runnerless artifact publication, and
-  a GitHub Pages USB flasher with browser-local configuration and checksums.
-- A `no_std` ESP32-C3 round-display example for live OpenWrt statistics over
-  uhttpd's ubus bridge, with read-only rpcd setup and touch-controlled pages.
-- Optional portable atomics for shared-buffer transports on targets such as
-  ESP32-C3 without native pointer-width atomics.
-- Parallel compatibility coverage for ACL identities and reloads, descriptor
-  passing, daemon lifecycle, upstream and Rust CLIs, and real rpcd/UCI/file
-  consumers, with isolated per-process fixtures.
-- Full-workspace upstream drift checks and concurrent fault-profile runs.
 
 ### Fixed
 
@@ -78,6 +73,35 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Reduce large-message broker receive syscalls with a shared adaptive buffer,
   while preserving batching and descriptor boundaries.
+
+## [0.3.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...ubus-zero-v0.3.0) (2026-10-16)
+
+
+### Features
+
+* publish C3 firmware and add a GitHub Pages USB flasher ([#21](https://github.com/no-std-rs/ubus-zero/issues/21)) ([89422c0](https://github.com/no-std-rs/ubus-zero/commit/89422c0c9e36b25e2de9bd9279e9167f304f4177))
+* add no_std ESP32-C3 OpenWrt router dashboard ([#20](https://github.com/no-std-rs/ubus-zero/issues/20)) ([8babfbb](https://github.com/no-std-rs/ubus-zero/commit/8babfbbe3b341250989affa1097ad83c27b2db92))
+
+### Bug Fixes
+
+* **ci:** isolate Cargo artifacts for concurrent fault profiles ([#23](https://github.com/no-std-rs/ubus-zero/issues/23)) ([051b507](https://github.com/no-std-rs/ubus-zero/commit/051b507b5a41a7207385381e498202516bb8094d))
+* **release:** capture released versions without mirroring their crates.io entries ([#18](https://github.com/no-std-rs/ubus-zero/issues/18)) ([36109d2](https://github.com/no-std-rs/ubus-zero/commit/36109d260675c6d0af0b680ab15944e856519bd2))
+
+### Added
+
+- Public ESP32-C3 factory firmware builds, Runnerless artifact publication, and
+  a GitHub Pages USB flasher with browser-local configuration and checksums.
+- A `no_std` ESP32-C3 round-display example for live OpenWrt statistics over
+  uhttpd's ubus bridge, with read-only rpcd setup and touch-controlled pages.
+- Optional portable atomics for shared-buffer transports on targets such as
+  ESP32-C3 without native pointer-width atomics.
+- Parallel compatibility coverage for ACL identities and reloads, descriptor
+  passing, daemon lifecycle, upstream and Rust CLIs, and real rpcd/UCI/file
+  consumers, with isolated per-process fixtures.
+- Full-workspace upstream drift checks and concurrent fault-profile runs.
+
+### Fixed
+
 - Preserve ubus frame and descriptor boundaries across fragmented and pipelined
   socket reads, including disposal of descriptors outside the header window.
 - Keep fragmented Unix client replies buffered until the outer blob header
@@ -124,6 +148,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Differential compatibility suite backed by a private Rust broker and pinned
   OpenWrt reference builds.
 
-[Unreleased]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.2.0...HEAD
+[Unreleased]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.0...HEAD
 [0.2.0]: https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.1.0...ubus-zero-v0.2.0
 [0.1.0]: https://github.com/no-std-rs/ubus-zero/releases/tag/ubus-zero-v0.1.0
