@@ -1742,10 +1742,8 @@ fn invoke_forwarded_to_owner_carries_caller_user_group(#[case] arm: MatrixArm) {
     );
 }
 
-// Method name "ninechars" (length 9) forces the inner METHOD attr to be
-// 13 bytes — the outer envelope ends up non-4-aligned, so the broker
-// must consume the trailing 3-byte pad on INVOKE forward or the next
-// frame's msghdr is read at the wrong offset.
+// The method name exercises padding inside the envelope. That padding is
+// included in the outer length, unlike padding after a standalone blob.
 fn lookup_with_non_4_aligned_method_name_body(path: &str) {
     let path = path.to_owned();
 

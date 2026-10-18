@@ -4,19 +4,16 @@
 //! the wrapper on the client side, and upstream `ubusd` emits the
 //! same shape back to the client (broker -> client HELLO is also
 //! 8 + 4 = 12 bytes on the wire — see `ubusd::reply::hello_reply`
-//! and the cross-impl matrix that pins the parity). The parser
-//! short-circuits HELLO before reading the body, so the 4 trailing
-//! bytes are simply ignored either way. Typed messages (DATA /
+//! and the cross-impl matrix that pins the parity). Typed messages (DATA /
 //! STATUS / INVOKE / …) carry exactly one outer `blob_attr` whose
 //! 24-bit length field is the on-wire framing boundary — there is
-//! no separate outer length prefix; the next frame begins after
-//! the 4-byte-aligned outer attr.
+//! no separate outer length prefix; the next frame begins immediately after
+//! the declared outer attribute, without trailing alignment padding.
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
-use crate::blob::align4;
 use crate::error::UbusError;
 
 /// Wire-side object identity. Always non-zero (the protocol reserves
@@ -264,8 +261,8 @@ impl Frame {
 pub struct Codec;
 
 impl Codec {
-    /// Encode a borrowed frame into fixed storage, adding its outer alignment
-    /// padding. The output is unchanged on error; this never allocates.
+    /// Encode a borrowed frame into fixed storage using its exact outer length.
+    /// The output is unchanged on error; this never allocates.
     pub fn write_frame_to_slice(
         frame: FrameRef<'_>,
         out: &mut [u8],
@@ -286,7 +283,7 @@ impl Codec {
         if payload.len() > MAX_MSG_LEN {
             return Err(BufferError::Length);
         }
-        let needed = HEADER_SIZE + align4(payload.len());
+        let needed = HEADER_SIZE + payload.len();
         if out.len() < needed {
             return Err(BufferError::Capacity {
                 needed,
@@ -295,7 +292,6 @@ impl Codec {
         }
         out[..HEADER_SIZE].copy_from_slice(&frame.hdr.encode());
         out[HEADER_SIZE..HEADER_SIZE + payload.len()].copy_from_slice(payload);
-        out[HEADER_SIZE + payload.len()..needed].fill(0);
         Ok(needed)
     }
 
@@ -389,21 +385,11 @@ impl Codec {
         if attr_len > MAX_MSG_LEN {
             return Err(UbusError::Malformed("attr_len exceeds max frame size"));
         }
-        // `id_len` is the *unpadded* declared length but the next msghdr
-        // starts on a 4-byte boundary, so the receiver advances past
-        // the trailing alignment pad. Real ubusd emits non-4-aligned
-        // attr_len for some control frames; without skipping the pad,
-        // 1–3 stale bytes leak into the next read and poison its
-        // msghdr. The returned `payload` slice stays unpadded —
-        // `envelope::unwrap` reads total_len from its first 4 bytes
-        // and would mis-bound otherwise.
+        // libubus sends blob_raw_len, and ubusd reads that exact length.
+        // Only attributes inside the outer blob use four-byte alignment;
+        // rounding the stream boundary up consumes the next frame's header.
         let payload_end = body_start + attr_len;
-        let consumed = body_start + align4(attr_len);
-        // Require the full aligned length: on a stream-oriented
-        // transport, returning a frame whose pad bytes haven't arrived
-        // yet would leave 1–3 stray bytes at the front of the next
-        // read and corrupt the next msghdr. Callers that observe EOF
-        // mid-pad must drop the residual bytes themselves.
+        let consumed = payload_end;
         if buf.len() < consumed {
             return Err(UbusError::Short {
                 need: consumed,
@@ -572,37 +558,35 @@ mod tests {
         }
     }
 
-    /// Outer attr with non-4-aligned total_len (9 + 3 pad). The
-    /// receiver must consume the pad or the next frame's msghdr is
-    /// read at the wrong offset.
     #[test]
-    fn read_frame_consumes_outer_alignment_pad() {
-        let mut buf = alloc::vec::Vec::new();
-        let hdr = Header {
-            version: PROTO_VERSION,
-            ty: MsgType::Data,
-            seq: 1,
-            peer: 0,
-        };
-        buf.extend_from_slice(&hdr.encode());
-        let id_len: u32 = 9;
-        buf.extend_from_slice(&id_len.to_be_bytes());
-        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-        buf.extend_from_slice(&[0u8; 3]);
-        let next_hdr = Header {
-            version: PROTO_VERSION,
-            ty: MsgType::Status,
-            seq: 2,
-            peer: 0,
-        };
-        buf.extend_from_slice(&next_hdr.encode());
-
-        let (frame, consumed) = Codec::read_frame(&buf).unwrap();
-        assert_eq!(frame.hdr, hdr);
-        assert_eq!(frame.payload.len(), 9);
-        assert_eq!(consumed, HEADER_SIZE + 12);
-        let (frame2, _) = Codec::read_frame(&buf[consumed..]).unwrap();
-        assert_eq!(frame2.hdr, next_hdr);
+    fn unaligned_outer_length_is_the_exact_stream_boundary() {
+        // libubus sends blob_raw_len, not blob_pad_len. Attribute padding
+        // inside the envelope does not add padding after the outer blob.
+        for length in [5_u32, 6, 7, 9, 10, 11] {
+            let mut payload = alloc::vec![0xaa; length as usize];
+            payload[..4].copy_from_slice(&length.to_be_bytes());
+            let frame = Frame::to_broker(MsgType::Ping, 17, payload);
+            let bytes = Codec::write_frame(&frame);
+            for cut in HEADER_SIZE + 1..bytes.len() {
+                assert!(matches!(
+                    Codec::read_frame_borrowed(&bytes[..cut]),
+                    Err(UbusError::Short { .. })
+                ));
+            }
+            let next = Frame::to_broker(MsgType::Ping, 18, EnvBuilder::new().finish());
+            let mut pipeline = bytes.clone();
+            pipeline.extend_from_slice(&Codec::write_frame(&next));
+            for input in [&bytes, &pipeline] {
+                let (decoded, consumed) = Codec::read_frame(input).unwrap();
+                assert_eq!(decoded, frame);
+                assert_eq!(consumed, bytes.len());
+                let (borrowed, consumed) = Codec::read_frame_borrowed(input).unwrap();
+                assert_eq!(borrowed.to_owned(), frame);
+                assert_eq!(consumed, bytes.len());
+            }
+            let (decoded, _) = Codec::read_frame(&pipeline[bytes.len()..]).unwrap();
+            assert_eq!(decoded, next);
+        }
     }
 
     /// A peer-supplied 16 MiB attr_len would otherwise force the read
@@ -625,31 +609,5 @@ mod tests {
             Codec::read_frame(&buf),
             Err(UbusError::Malformed("attr_len exceeds max frame size"))
         ));
-    }
-
-    /// Buffer ends at unpadded payload end (mid-pad). On a stream
-    /// transport we must wait for the pad bytes rather than return a
-    /// frame and leave 1–3 stale bytes at the head of the next read.
-    #[test]
-    fn read_frame_short_until_alignment_pad_arrives() {
-        let mut buf = alloc::vec::Vec::new();
-        let hdr = Header {
-            version: PROTO_VERSION,
-            ty: MsgType::Data,
-            seq: 3,
-            peer: 0,
-        };
-        buf.extend_from_slice(&hdr.encode());
-        let id_len: u32 = 9;
-        buf.extend_from_slice(&id_len.to_be_bytes());
-        buf.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
-        assert!(matches!(
-            Codec::read_frame(&buf),
-            Err(UbusError::Short { .. })
-        ));
-        buf.extend_from_slice(&[0u8; 3]);
-        let (frame, consumed) = Codec::read_frame(&buf).unwrap();
-        assert_eq!(frame.hdr, hdr);
-        assert_eq!(consumed, buf.len());
     }
 }
