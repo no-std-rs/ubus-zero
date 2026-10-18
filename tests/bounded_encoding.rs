@@ -166,10 +166,10 @@ fn unclosed_or_malformed_output_is_rejected_without_touching_destination() {
         &mut output,
     )
     .unwrap();
-    assert_eq!(n, 16);
-    assert_eq!(&output[13..], &[0, 0, 0]);
+    assert_eq!(n, 13);
+    assert_eq!(&output[n..], &[0xaa; 3]);
     assert_eq!(
-        Codec::read_frame_borrowed(&output).unwrap().0.payload,
+        Codec::read_frame_borrowed(&output[..n]).unwrap().0.payload,
         &[0, 0, 0, 5, 7]
     );
 }

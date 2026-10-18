@@ -49,7 +49,8 @@ Open and close an anonymous TABLE when a complete outer blobmsg table is needed.
 `Codec::read_frame_borrowed` returns a view into input storage. It also accepts
 the legacy eight-byte in-memory header form. A stream consumer must wait for at
 least **12 bytes** before decoding, because socket frames include an outer blob
-header. Keep partial frames and alignment padding until all required bytes arrive.
+header. Keep partial frames until the declared outer length arrives; the wire
+has no padding after the outer blob.
 
 ## Submit from a Linux signal handler
 
@@ -62,7 +63,7 @@ handler-local stack buffers and the fixed builders above.
 
 `SignalSender::try_submit` validates one complete frame, then makes one
 nonblocking pipe write. Its limit is **4,096 bytes including the wire header and
-padding**. Linux guarantees atomic pipe writes within `PIPE_BUF`; `Full` and
+outer blob**. Linux guarantees atomic pipe writes within `PIPE_BUF`; `Full` and
 `Interrupted` accept no bytes. Concurrent or nested submissions do not mix frame
 bytes. The queue retains both pipe ends, preventing a live safe sender from
 losing its reader and raising SIGPIPE. There is no retry loop, clock, allocator,

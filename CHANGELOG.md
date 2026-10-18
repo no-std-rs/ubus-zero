@@ -50,6 +50,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Decode the exact outer ubus length without waiting for stream padding, and
+  preserve the next frame and descriptor after an unaligned outer blob.
 - Allocate per-peer byte buffers lazily and recycle empty receive/transmit
   buffers through bounded broker-wide spares, preserving partial input and FDs.
 - Verify relay descriptor closure with per-pipe EOF instead of process-wide FD

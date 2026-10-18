@@ -70,7 +70,7 @@ pub struct SignalSender<'a> {
 }
 
 impl SignalSender<'_> {
-    /// Submit one complete wire frame, including its outer blob and padding.
+    /// Submit one complete wire frame, including its exact-length outer blob.
     /// No bytes are accepted on `Full`, `Interrupted` or validation failure.
     /// Each concurrent/reentrant caller must supply its own immutable bytes.
     pub fn try_submit(&self, frame: &[u8]) -> Result<(), SubmitError> {

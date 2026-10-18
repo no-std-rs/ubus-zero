@@ -1252,7 +1252,7 @@ fn rx_frame_window(peer: &Peer, frame_start: &mut usize) -> Option<(usize, bool)
         if !(4..=ubus::wire::MAX_MSG_LEN).contains(&raw_len) {
             return None;
         }
-        let frame_len = ubus::wire::HEADER_SIZE + ubus::blob::align4(raw_len);
+        let frame_len = ubus::wire::HEADER_SIZE + raw_len;
         if available >= frame_len {
             *frame_start += frame_len;
             continue;
@@ -1904,6 +1904,36 @@ mod rx_frame_tests {
             assert!(peer.take_rx_fd(0).is_some());
             assert_pipe_closed(&read_end);
         }
+    }
+
+    #[test]
+    fn unaligned_frame_preserves_the_following_headers_descriptor() {
+        let (sender, receiver) = sockets();
+        let first = Codec::write_frame(&Frame::to_broker(
+            MsgType::Ping,
+            1,
+            vec![0, 0, 0, 9, 14, 0, 0, 5, 0x71],
+        ));
+        let second = Codec::write_frame(&Frame::to_broker(
+            MsgType::Ping,
+            2,
+            EnvBuilder::new().finish(),
+        ));
+        let (read_end, write_end) = pipe().unwrap();
+        assert_eq!(rustix::io::write(&sender, &first).unwrap(), first.len());
+        send_rights(&sender, &second, &write_end, 1);
+        drop(write_end);
+        let mut peer = Peer::new(receiver, Some(0), None, None);
+        assert!(read_into_buf(
+            &mut peer,
+            PeerId::new(1).unwrap(),
+            &mut vec![0; 4096]
+        ));
+        assert_eq!(peer.rx_buf, [first.as_slice(), second.as_slice()].concat());
+        assert!(peer.take_rx_fd(0).is_none());
+        let descriptor = peer.take_rx_fd(first.len()).expect("next frame's fd");
+        drop(descriptor);
+        assert_pipe_closed(&read_end);
     }
 
     #[test]
