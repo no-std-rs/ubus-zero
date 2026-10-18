@@ -1,5 +1,12 @@
 # Changelog
 
+All notable changes to `ubus-zero` are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
 ## [0.4.1](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.0...ubus-zero-v0.4.1) (2026-10-18)
 
 
@@ -11,30 +18,9 @@
 * retire object routes during path replacement ([#35](https://github.com/no-std-rs/ubus-zero/issues/35)) ([7cee88e](https://github.com/no-std-rs/ubus-zero/commit/7cee88e999721346ffe0147f1797738473185879))
 * reject I/O after an abandoned partial Unix send ([#34](https://github.com/no-std-rs/ubus-zero/issues/34)) ([d497282](https://github.com/no-std-rs/ubus-zero/commit/d497282f3d00a96d8d58289ada2a4192c6ac88b1))
 
-All notable changes to `ubus-zero` are documented here.
+### Performance Improvements
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Performance
-
-- Share encoded NOTIFY templates across subscribers and stamp object IDs in
-  reusable transmit scratch, preserving independently owned queued output.
-
-### Fixed
-
-- Preserve empty JSON object keys in the high-level codec, including nested
-  tables and array elements, while keeping low-level C formatter parity.
-- Report oversized provider replies as handler errors before sending DATA,
-  preserving the registered service for subsequent calls.
-- Apply the shared envelope policy in typed messages, preserving valid
-  Status, ObjId and Method attributes before invalid duplicates.
-- Remove retired-object subscriptions and event registrations when replacing
-  a path, preserving sibling subscriptions and notifying affected peers.
-- Reject further I/O after an allocating Unix transport abandons a partial
-  send, preventing later frames from corrupting the unfinished frame.
+* share NOTIFY fan-out templates across subscribers ([#39](https://github.com/no-std-rs/ubus-zero/issues/39)) ([fffe3b0](https://github.com/no-std-rs/ubus-zero/commit/fffe3b0294ee32e8e65fd899e544dfc1ba16eb4e))
 
 ## [0.4.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.3.0...ubus-zero-v0.4.0) (2026-10-18)
 
