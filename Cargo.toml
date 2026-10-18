@@ -7,7 +7,7 @@ members = [
     "crates/ubus-client",
 ]
 resolver = "2"
-exclude = ["examples/esp32c3-router-display"]
+exclude = ["examples/esp32c3-router-display", "examples/noalloc-smoke"]
 
 [package]
 name = "ubus-zero"
@@ -31,6 +31,7 @@ include = [
     "/NOTICE",
     "/assets/ubus-zero.svg",
     "/docs/cellctl-imports.md",
+    "/docs/bounded-io.md",
     "/src/**",
     "/tests/round_trip.rs",
 ]
@@ -40,20 +41,26 @@ name = "ubus"
 path = "src/lib.rs"
 
 [features]
-default = []
-testing = []
-json = ["dep:serde_json"]
-unix = ["dep:rustix"]
-portable-atomic = ["spin/portable-atomic", "dep:portable-atomic-util"]
+default = ["alloc"]
+alloc = ["dep:spin"]
+testing = ["alloc"]
+json = ["alloc", "dep:serde_json"]
+unix = ["alloc", "dep:rustix", "rustix/alloc", "rustix/net", "rustix/event", "rustix/time"]
+# rustix 1.1.5 socket options require its time types in isolated builds.
+signal = ["dep:rustix", "rustix/pipe", "rustix/net", "rustix/time"]
+portable-atomic = ["alloc", "spin/portable-atomic", "dep:portable-atomic-util"]
 
 [dependencies]
 thiserror = { version = "2", default-features = false }
-spin      = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
+spin      = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"], optional = true }
 serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1.1", default-features = false, features = ["alloc", "net", "event", "time"], optional = true }
+rustix = { version = "1.1", default-features = false, optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 rstest = { version = "0.27", default-features = false }
@@ -80,3 +87,9 @@ panic = "abort"
 [profile.bench-driver]
 inherits = "release"
 opt-level = 3
+
+[[test]]
+name = "signal_submit"
+path = "tests/signal_submit.rs"
+harness = false
+required-features = ["signal", "testing"]

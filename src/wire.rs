@@ -12,6 +12,7 @@
 //! no separate outer length prefix; the next frame begins after
 //! the 4-byte-aligned outer attr.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
@@ -194,6 +195,7 @@ impl Header {
     }
 }
 
+#[cfg(feature = "alloc")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     pub hdr: Header,
@@ -207,6 +209,7 @@ pub struct FrameRef<'a> {
     pub payload: &'a [u8],
 }
 
+#[cfg(feature = "alloc")]
 impl FrameRef<'_> {
     pub fn to_owned(self) -> Frame {
         Frame {
@@ -216,6 +219,7 @@ impl FrameRef<'_> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> From<&'a Frame> for FrameRef<'a> {
     fn from(frame: &'a Frame) -> Self {
         Self {
@@ -225,6 +229,7 @@ impl<'a> From<&'a Frame> for FrameRef<'a> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl Frame {
     /// `peer=0` is the wire convention for "destination = ubusd". Sending
     /// peer=local_id makes ubusd treat the message as targeted at us and
@@ -259,6 +264,47 @@ impl Frame {
 pub struct Codec;
 
 impl Codec {
+    /// Encode a borrowed frame into fixed storage, adding its outer alignment
+    /// padding. The output is unchanged on error; this never allocates.
+    pub fn write_frame_to_slice(
+        frame: FrameRef<'_>,
+        out: &mut [u8],
+    ) -> Result<usize, crate::BufferError> {
+        use crate::BufferError;
+        let payload = frame.payload;
+        if !payload.is_empty() {
+            let bytes: [u8; 4] = payload
+                .get(..4)
+                .ok_or(BufferError::MalformedFrame)?
+                .try_into()
+                .map_err(|_| BufferError::MalformedFrame)?;
+            let declared = (u32::from_be_bytes(bytes) & 0x00ff_ffff) as usize;
+            if declared < 4 || declared != payload.len() {
+                return Err(BufferError::MalformedFrame);
+            }
+        }
+        if payload.len() > MAX_MSG_LEN {
+            return Err(BufferError::Length);
+        }
+        let needed = HEADER_SIZE + align4(payload.len());
+        if out.len() < needed {
+            return Err(BufferError::Capacity {
+                needed,
+                available: out.len(),
+            });
+        }
+        out[..HEADER_SIZE].copy_from_slice(&frame.hdr.encode());
+        out[HEADER_SIZE..HEADER_SIZE + payload.len()].copy_from_slice(payload);
+        out[HEADER_SIZE + payload.len()..needed].fill(0);
+        Ok(needed)
+    }
+
+    /// Decode a frame without copying its payload or requiring an allocator.
+    pub fn read_frame_borrowed(buf: &[u8]) -> Result<(FrameRef<'_>, usize), UbusError> {
+        Self::read_frame_with(buf, Header::decode)
+    }
+
+    #[cfg(feature = "alloc")]
     pub fn write_frame(frame: &Frame) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_SIZE + frame.payload.len());
         Self::write_frame_into(frame, &mut out);
@@ -266,6 +312,7 @@ impl Codec {
     }
 
     /// Encode into reusable storage, retaining its capacity between sends.
+    #[cfg(feature = "alloc")]
     pub fn write_frame_into(frame: &Frame, out: &mut Vec<u8>) {
         out.clear();
         out.extend_from_slice(&frame.hdr.encode());
@@ -280,14 +327,16 @@ impl Codec {
     /// so the read buffer never contains both at once; tests that
     /// pre-queue multiple frames must use the libubus-shape HELLO
     /// (header + 4-byte empty envelope) to give the codec a length.
+    #[cfg(feature = "alloc")]
     pub fn read_frame(buf: &[u8]) -> Result<(Frame, usize), UbusError> {
         Self::read_frame_with(buf, Header::decode).map(|(frame, size)| (frame.to_owned(), size))
     }
 
     /// Broker-side frame decode compatible with upstream `ubusd`:
     /// tolerate any header version byte while preserving it in the
-    /// returned [`Frame`]. Client-side transports intentionally keep
-    /// using [`read_frame`](Self::read_frame), which remains strict.
+    /// returned frame. Client-side transports intentionally keep
+    /// using strict version checks.
+    #[cfg(feature = "alloc")]
     pub fn read_frame_lenient_version(buf: &[u8]) -> Result<(Frame, usize), UbusError> {
         Self::read_frame_borrowed_lenient_version(buf).map(|(frame, size)| (frame.to_owned(), size))
     }
@@ -366,7 +415,7 @@ impl Codec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::envelope::EnvBuilder;

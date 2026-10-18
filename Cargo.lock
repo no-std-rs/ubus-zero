@@ -322,6 +322,7 @@ dependencies = [
 name = "ubus-zero"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "portable-atomic-util",
  "rstest",
  "rustix",

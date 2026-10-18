@@ -8,7 +8,8 @@ Open an issue for substantial API changes or new protocol surface so the wire
 behavior and compatibility plan can be agreed on first. Small fixes, tests, and
 documentation improvements can go directly to a pull request.
 
-Please keep the public crate `no_std + alloc`, preserve the transport boundary,
+Keep the public crate `no_std`, with owned APIs behind the default `alloc`
+feature and the borrowed/fixed-buffer layer usable without an allocator. Preserve the transport boundary,
 and avoid coupling protocol code to a particular socket, executor, or logging
 implementation.
 

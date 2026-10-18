@@ -14,7 +14,7 @@
 //! 5. drains tx buffers, re-arming POLLOUT for any peer that
 //!    short-wrote.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
@@ -181,6 +181,10 @@ pub struct Broker {
     /// 64 KiB, so large messages do not require one syscall per 4 KiB.
     rx_scratch: Vec<u8>,
     tx_scratch: Vec<u8>,
+    // Complete requests and drained output return their storage here.
+    // Idle peers retain no byte buffers; partial input/backpressure stay local.
+    rx_spare: Vec<u8>,
+    tx_spare: VecDeque<u8>,
 }
 
 impl Broker {
@@ -244,6 +248,8 @@ impl Broker {
             peer_revents_buf: Vec::new(),
             rx_scratch: vec![0; 4096],
             tx_scratch: Vec::with_capacity(4096),
+            rx_spare: Vec::new(),
+            tx_spare: VecDeque::new(),
         };
         if acl_load.had_candidates {
             broker.broadcast_acl_sequence();
@@ -609,6 +615,9 @@ impl Broker {
         let Some(peer) = self.peers.get_mut(peer_id) else {
             return;
         };
+        if peer.rx_buf.capacity() == 0 {
+            std::mem::swap(&mut peer.rx_buf, &mut self.rx_spare);
+        }
         let mut close = !read_into_buf_available(peer, peer_id, &mut self.rx_scratch, !drain_eof);
         // Own this buffer locally so borrowed payloads survive registry mutation.
         // The connection remains live until the poll loop's deferred reaper.
@@ -650,6 +659,12 @@ impl Broker {
         bytes.drain(..consumed);
         if bytes.is_empty() && bytes.capacity() > 64 * 1024 {
             bytes.shrink_to(4096);
+        }
+        if bytes.is_empty() {
+            if bytes.capacity() > self.rx_spare.capacity() {
+                self.rx_spare = bytes;
+            }
+            bytes = Vec::new();
         }
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.rx_abs = start.saturating_add(consumed);
@@ -815,6 +830,9 @@ impl Broker {
             return;
         }
         peer.tx_fds.push_back((peer.tx_enq_abs, fd));
+        if peer.tx_buf.capacity() == 0 {
+            std::mem::swap(&mut peer.tx_buf, &mut self.tx_spare);
+        }
         peer.enqueue(bytes);
         self.tx_ready.insert(peer_id);
         self.sync_write_interest(peer_id);
@@ -878,6 +896,9 @@ impl Broker {
             self.pending_close.insert(peer_id);
             return;
         }
+        if peer.tx_buf.capacity() == 0 {
+            std::mem::swap(&mut peer.tx_buf, &mut self.tx_spare);
+        }
         peer.enqueue(bytes);
         self.tx_ready.insert(peer_id);
         self.sync_write_interest(peer_id);
@@ -917,6 +938,10 @@ impl Broker {
                 if peer.tx_buf.capacity() > 64 * 1024 {
                     peer.tx_buf.shrink_to(4096);
                 }
+                if peer.tx_buf.capacity() > self.tx_spare.capacity() {
+                    std::mem::swap(&mut peer.tx_buf, &mut self.tx_spare);
+                }
+                peer.tx_buf = VecDeque::new();
                 return;
             }
             let buf = if !front.is_empty() { front } else { back };
@@ -1602,6 +1627,96 @@ mod tests {
 
     fn pid(n: u32) -> PeerId {
         PeerId::new(n).unwrap()
+    }
+
+    fn memory_broker() -> Broker {
+        let path = ubus_testkit::unique_socket_path("buffer-pool");
+        Broker::bind(Config {
+            socket_path: path.to_str().unwrap().into(),
+            ..Config::default()
+        })
+        .unwrap()
+    }
+
+    fn memory_peer(broker: &mut Broker) -> (PeerId, OwnedFd) {
+        let (fd, client) = rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::NONBLOCK | rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .unwrap();
+        let id = broker
+            .peers
+            .insert(Peer::new(fd, Some(0), None, None))
+            .unwrap()
+            .0;
+        #[cfg(target_os = "linux")]
+        broker
+            .poller
+            .add_peer(broker.peers.get(id).unwrap().fd.as_ref().unwrap(), id)
+            .unwrap();
+        (id, client)
+    }
+
+    #[test]
+    fn completed_bursts_share_storage_while_partial_peer_keeps_its_bytes() {
+        use ubus::envelope::EnvBuilder;
+        let mut broker = memory_broker();
+        let (first, client) = memory_peer(&mut broker);
+        let mut env = EnvBuilder::new();
+        env.push_data(&[0x55; 32 * 1024]);
+        let bytes = Codec::write_frame(&Frame::to_broker(MsgType::Ping, 7, env.finish()));
+        rustix::io::write(&client, &bytes[..17]).unwrap();
+        broker.drain_rx_and_dispatch(first, false);
+        assert_eq!(broker.peers.get(first).unwrap().rx_buf, bytes[..17]);
+        let mut clients = Vec::new();
+        for _ in 0..100 {
+            let (id, socket) = memory_peer(&mut broker);
+            assert_eq!(rustix::io::write(&socket, &bytes).unwrap(), bytes.len());
+            broker.drain_rx_and_dispatch(id, false);
+            let mut response = vec![0; bytes.len() + 64];
+            let n = rustix::io::read(&socket, &mut response).unwrap();
+            let (data, consumed) = Codec::read_frame_borrowed(&response[..n]).unwrap();
+            let (status, rest) = Codec::read_frame_borrowed(&response[consumed..n]).unwrap();
+            assert_eq!(data.hdr.ty, MsgType::Data);
+            assert_eq!(status.hdr.ty, MsgType::Status);
+            assert_eq!(status.hdr.seq, 7);
+            assert_eq!(consumed + rest, n);
+            let peer = broker.peers.get(id).unwrap();
+            assert_eq!(peer.rx_buf.capacity() + peer.tx_buf.capacity(), 0);
+            clients.push(socket);
+        }
+        assert_eq!(broker.peers.get(first).unwrap().rx_buf, bytes[..17]);
+        rustix::io::write(&client, &bytes[17..]).unwrap();
+        broker.drain_rx_and_dispatch(first, false);
+        assert_eq!(broker.peers.get(first).unwrap().rx_buf.capacity(), 0);
+        assert!(broker.rx_spare.capacity() <= 64 * 1024);
+    }
+
+    #[test]
+    fn drained_fd_output_recycles_storage_without_resetting_stream_offsets() {
+        let mut broker = memory_broker();
+        let (id, client) = memory_peer(&mut broker);
+        let bytes = Codec::write_frame(&reply::hello_reply(0, id));
+        for cycle in 1..=3 {
+            let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::NONBLOCK).unwrap();
+            broker.enqueue_bytes_with_fd(id, &bytes, write);
+            broker.drain_tx(id);
+            let mut response = [0; 64];
+            assert_eq!(
+                rustix::io::read(&client, &mut response).unwrap(),
+                bytes.len()
+            );
+            assert_eq!(&response[..bytes.len()], bytes);
+            // read() discards SCM_RIGHTS; all write-end copies must close.
+            assert_eq!(rustix::io::read(&read, &mut [0; 1]).unwrap(), 0);
+            let peer = broker.peers.get(id).unwrap();
+            assert_eq!(peer.tx_buf.capacity(), 0);
+            assert!(peer.tx_fds.is_empty());
+            assert_eq!(peer.tx_sent_abs, cycle * bytes.len());
+            assert_eq!(peer.tx_enq_abs, peer.tx_sent_abs);
+        }
     }
 
     #[test]

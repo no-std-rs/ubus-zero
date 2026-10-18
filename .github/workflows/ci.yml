@@ -44,6 +44,9 @@ jobs:
       - name: Check
         run: cargo check --workspace --all-targets --all-features
 
+      - name: Allocator-free Linux API
+        run: cargo clippy -p ubus-zero --no-default-features --features signal --lib -- -D warnings
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -76,6 +79,10 @@ jobs:
       - name: Install pinned Rust toolchain and C3 target
         working-directory: examples/esp32c3-router-display
         run: rustup show
+      - name: Link without a global allocator
+        run: |
+          cargo fmt --manifest-path examples/noalloc-smoke/Cargo.toml -- --check
+          cargo build --locked --manifest-path examples/noalloc-smoke/Cargo.toml --target riscv32imc-unknown-none-elf --release
       - name: Format example
         run: cargo fmt --manifest-path examples/esp32c3-router-display/Cargo.toml -- --check
       - name: Test portable dashboard logic

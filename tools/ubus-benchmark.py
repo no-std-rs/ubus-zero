@@ -30,7 +30,7 @@ CASES = [
     ("connect", 1, 0), ("ping", 1, 0), ("ping-pipeline", 1, 0), ("lookup", 1, 0),
     ("echo", 1, 64), ("echo", 1, 4096), ("echo", 1, 32768), ("echo", 4, 4096),
     ("lookup-many", 1, 0), ("lookup-prefix", 1, 0), ("acl-lookup", 1, 0),
-    ("registry-churn", 1, 0), ("ping-idle", 1, 0), ("event-fanout", 1, 0), ("notify-fanout", 1, 0),
+    ("registry-churn", 1, 0), ("ping-idle", 1, 0), ("ping-after-burst", 1, 0), ("event-fanout", 1, 0), ("notify-fanout", 1, 0),
 ]
 
 
@@ -192,7 +192,8 @@ def label(case):
     workload = {"ping-pipeline": "ping (32 outstanding)",
                 "lookup-many": "list 1000 objects", "lookup-prefix": "prefix 100 of 1000 objects",
                 "acl-lookup": "100 objects / 100 ACL rules", "registry-churn": "register/remove",
-                "ping-idle": "ping with 200 idle peers", "event-fanout": "event / 50 listeners",
+                "ping-idle": "ping with 200 idle peers",
+                "ping-after-burst": "ping after 200 peers send 32 KiB", "event-fanout": "event / 50 listeners",
                 "notify-fanout": "notify / 50 subscribers"}.get(workload, workload)
     suffix = f" {payload_bytes} B" if payload_bytes else ""
     return f"{workload}{suffix}, {clients} client{'s' if clients != 1 else ''}"

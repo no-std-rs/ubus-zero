@@ -6689,3 +6689,134 @@ fn duplicate_noreply_policy_body(path: &str) {
     }
 }
 matrix_scenario!(duplicate_noreply_policy, duplicate_noreply_policy_body);
+
+#[cfg(all(target_os = "linux", feature = "signal"))]
+fn bounded_queue_to_stream_ping_body(path: &str) {
+    use rustix::{
+        fd::AsFd,
+        io::Errno,
+        net::{SocketAddrUnix, SocketFlags, SocketType},
+    };
+    use ubus::{
+        bounded::{BlobSliceBuilder, EnvSliceBuilder},
+        signal::SignalQueue,
+        unix::{SendProgress, StreamSender},
+        wire::{Codec, FrameRef},
+    };
+    let socket = rustix::net::socket_with(
+        rustix::net::AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    rustix::net::connect(&socket, &SocketAddrUnix::new(path).unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut input = [0; 512];
+    let mut filled = 0;
+    while filled < 12 {
+        assert!(Instant::now() < deadline, "HELLO deadline");
+        match rustix::io::read(&socket, &mut input[filled..]) {
+            Ok(0) => panic!("closed before HELLO"),
+            Ok(n) => filled += n,
+            Err(Errno::AGAIN | Errno::INTR) => std::thread::yield_now(),
+            error => panic!("HELLO read: {error:?}"),
+        }
+    }
+    assert_eq!(
+        Codec::read_frame_borrowed(&input[..filled])
+            .unwrap()
+            .0
+            .hdr
+            .ty,
+        MsgType::Hello
+    );
+    let mut data_storage = [0; 96];
+    let mut data = BlobSliceBuilder::<2>::new(&mut data_storage);
+    data.put_str(Some("message"), "signal data").unwrap();
+    data.open_array(Some("values")).unwrap();
+    data.put_i32(None, 10).unwrap();
+    data.close().unwrap();
+    let mut env_storage = [0; 160];
+    let mut env = EnvSliceBuilder::new(&mut env_storage).unwrap();
+    env.push_data(data.finish().unwrap()).unwrap();
+    let payload = env.finish();
+    let mut frame_storage = [0; 192];
+    let n = Codec::write_frame_to_slice(
+        FrameRef {
+            hdr: Header {
+                version: 0,
+                ty: MsgType::Ping,
+                seq: 66,
+                peer: 0,
+            },
+            payload,
+        },
+        &mut frame_storage,
+    )
+    .unwrap();
+    let mut queue = SignalQueue::new().unwrap();
+    let (sender, mut receiver) = queue.split();
+    sender.try_submit(&frame_storage[..n]).unwrap();
+    let mut queued = [0; 192];
+    assert_eq!(receiver.read(&mut queued).unwrap(), n);
+    let mut stream = StreamSender::new(socket.as_fd());
+    let mut pending = stream.start(&queued[..n]).unwrap();
+    loop {
+        assert!(Instant::now() < deadline, "send deadline");
+        match pending.advance() {
+            Ok(SendProgress::Complete) => break,
+            Ok(SendProgress::Pending) | Err(Errno::AGAIN | Errno::INTR) => std::thread::yield_now(),
+            result => panic!("send: {result:?}"),
+        }
+    }
+    filled = 0;
+    let mut saw_data = false;
+    'receive: loop {
+        assert!(Instant::now() < deadline, "reply deadline");
+        match rustix::io::read(&socket, &mut input[filled..]) {
+            Ok(0) => panic!("closed before reply"),
+            Ok(n) => filled += n,
+            Err(Errno::AGAIN | Errno::INTR) => {
+                std::thread::yield_now();
+                continue;
+            }
+            result => panic!("read: {result:?}"),
+        }
+        let mut consumed = 0;
+        while filled - consumed >= 12 {
+            match Codec::read_frame_borrowed(&input[consumed..filled]) {
+                Ok((frame, n)) => {
+                    assert_eq!(frame.hdr.seq, 66);
+                    assert_eq!(frame.hdr.peer, 0);
+                    match frame.hdr.ty {
+                        MsgType::Data => {
+                            assert_eq!(frame.payload, payload);
+                            saw_data = true;
+                        }
+                        MsgType::Status => {
+                            assert!(saw_data);
+                            assert_eq!(
+                                find(frame.payload, UbusAttr::Status).unwrap().as_u32(),
+                                Some(0)
+                            );
+                            break 'receive;
+                        }
+                        ty => panic!("unexpected reply {ty:?}"),
+                    }
+                    consumed += n;
+                }
+                Err(UbusError::Short { .. }) => break,
+                result => panic!("reply codec: {result:?}"),
+            }
+        }
+        input.copy_within(consumed..filled, 0);
+        filled -= consumed;
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "signal"))]
+matrix_scenario!(
+    bounded_queue_to_stream_ping,
+    bounded_queue_to_stream_ping_body
+);

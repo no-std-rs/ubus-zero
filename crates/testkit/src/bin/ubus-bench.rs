@@ -54,6 +54,7 @@ impl Config {
                     | "acl-lookup"
                     | "registry-churn"
                     | "ping-idle"
+                    | "ping-after-burst"
                     | "event-fanout"
                     | "notify-fanout"
             )
@@ -267,7 +268,7 @@ impl Worker {
                     return Err("missing HELLO identity".into());
                 }
             }
-            "ping" | "ping-idle" => self
+            "ping" | "ping-idle" | "ping-after-burst" => self
                 .client
                 .as_mut()
                 .expect("persistent client")
@@ -530,9 +531,19 @@ fn run(config: &Config) -> Result<serde_json::Value> {
         }
         fixture_clients.push(owner);
     }
-    if config.workload == "ping-idle" {
+    if matches!(config.workload.as_str(), "ping-idle" | "ping-after-burst") {
         for _ in 0..200 {
-            fixture_clients.push(connect(&path)?);
+            let mut client = connect(&path)?;
+            if config.workload == "ping-after-burst" {
+                // Every idle peer first sends a 32 KiB frame. Waiting for its
+                // STATUS fences dispatch before timed ping/RSS measurements.
+                let mut env = EnvBuilder::new();
+                env.push_data(&[0x55; 32 * 1024]);
+                client
+                    .request(MsgType::Ping, 0, env, |_| Ok(()))
+                    .map_err(|error| error.to_string())?;
+            }
+            fixture_clients.push(client);
         }
     }
     let mut workers = Vec::new();

@@ -5,14 +5,16 @@
 <p align="center">
   <a href="https://github.com/no-std-rs/ubus-zero/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/no-std-rs/ubus-zero/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/no-std-rs/ubus-zero/blob/main/LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <img alt="no_std + alloc" src="https://img.shields.io/badge/no__std-alloc-6e40c9">
+  <img alt="no_std; optional alloc" src="https://img.shields.io/badge/no__std-optional_alloc-6e40c9">
 </p>
 
-`ubus-zero` is a `no_std + alloc` Rust implementation of the
+`ubus-zero` is a `no_std` Rust implementation of the
 [OpenWrt ubus](https://openwrt.org/docs/techref/ubus) wire protocol: a
 synchronous client, an object provider, and blob/blobmsg codecs. All I/O goes
 through a small `Transport` trait, so the protocol core has no dependency on
-Linux, sockets, executors or logging. An allocator is required.
+Linux, sockets, executors or logging. The default `alloc` feature provides the
+client and provider. Disable it for borrowed parsing and fixed-buffer encoding
+without an allocator; see the [bounded I/O guide](docs/bounded-io.md).
 
 The workspace also includes a Linux broker,
 [`ubusd`](https://github.com/no-std-rs/ubus-zero/blob/main/crates/ubusd/README.md),
@@ -30,7 +32,7 @@ Scenarios without broker-assigned IDs are compared as raw bytes.
 
 | Evidence | What it covers |
 | --- | --- |
-| 186 checked-in golden transcripts | 109 ACL and 77 protocol scenarios recorded from the pinned C broker; replayed against Rust without OpenWrt fixtures |
+| 187 checked-in golden transcripts | 109 ACL and 78 protocol scenarios recorded from the pinned C broker; replayed against Rust without OpenWrt fixtures |
 | Live differential matrix | The same scenarios run against both brokers. Live runs also check that the goldens still match the pinned binaries. |
 | Real OpenWrt consumers | The `ubus` CLI, libubus callers and providers, rpcd sessions, UCI and the rpcd file plugin |
 | Fault profiles | Fragmented client streams and injected `EINTR` across the strict suite, plus file-descriptor passing at framing boundaries |
@@ -53,14 +55,16 @@ The Cargo package is `ubus-zero`; the library crate is `ubus`.
 
 ```toml
 [dependencies]
-ubus = { package = "ubus-zero", git = "https://github.com/no-std-rs/ubus-zero", default-features = false }
+ubus = { package = "ubus-zero", git = "https://github.com/no-std-rs/ubus-zero", default-features = false, features = ["alloc"] }
 ```
 
 | Feature | Provides |
 | --- | --- |
-| *(none)* | Protocol, client, provider and codecs over your own `Transport`. Opens no sockets. |
-| `json` | `ubus::json::{json_to_blobmsg, blobmsg_to_json}`, still `alloc` without `std` |
-| `unix` | `ubus::unix::UnixUbusTransport` for Linux Unix sockets via rustix, with monotonic deadlines |
+| `alloc` (default) | Client, provider and owned codecs over your own `Transport`. Opens no sockets. |
+| *(no default features)* | Borrowed wire/blob/blobmsg readers and fixed-buffer builders; no allocator required |
+| `signal` | Linux bounded submission queue and resumable stream sender; works without `alloc` |
+| `json` (implies `alloc`) | `ubus::json::{json_to_blobmsg, blobmsg_to_json}`, still `alloc` without `std` |
+| `unix` (implies `alloc`) | `ubus::unix::UnixUbusTransport` for Linux Unix sockets via rustix, with monotonic deadlines |
 | `portable-atomic` | Shared-buffer helpers and the spin mutex on targets without pointer-width atomics (e.g. ESP32-C3) |
 
 Given a connected transport and a service providing `system.board`:
