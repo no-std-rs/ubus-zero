@@ -7,7 +7,7 @@
 //! the originating client's frame, not from the message itself.
 
 use crate::blobmsg::BlobMsgTable;
-use crate::envelope::{iter_attrs, unwrap, EnvBuilder, UbusAttr};
+use crate::envelope::{iter_attrs, policy_accepts, unwrap, EnvBuilder, UbusAttr};
 use crate::error::UbusError;
 use crate::wire::{Frame, MsgType, ObjId, PeerId};
 
@@ -186,11 +186,19 @@ impl<'a> InboundMsg<'a> {
         let mut status = None;
         let mut iter = iter_attrs(inner);
         while let Some(a) = iter.try_next()? {
-            match UbusAttr::from_u8(a.id) {
-                Some(UbusAttr::Method) => method = a.as_str(),
-                Some(UbusAttr::Data) => data = Some(a.as_blobmsg()),
-                Some(UbusAttr::ObjId) => obj_id = a.as_u32(),
-                Some(UbusAttr::Status) => status = a.as_u32().map(|u| u as i32),
+            let Some(id) = UbusAttr::from_u8(a.id) else {
+                continue;
+            };
+            // Match find/try_find and libubox: invalid duplicates do not
+            // replace an earlier value that the envelope policy accepted.
+            if !policy_accepts(&a, id) {
+                continue;
+            }
+            match id {
+                UbusAttr::Method => method = a.as_str(),
+                UbusAttr::Data => data = Some(a.as_blobmsg()),
+                UbusAttr::ObjId => obj_id = a.as_u32(),
+                UbusAttr::Status => status = a.as_u32().map(|u| u as i32),
                 _ => {}
             }
         }
@@ -312,6 +320,69 @@ mod tests {
             }
             other => panic!("expected Status, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn typed_status_preserves_last_policy_valid_duplicate() {
+        for invalid in [&[][..], &[6], &[0, 0, 0, 6, 0]] {
+            let mut env = EnvBuilder::new();
+            env.push_i32(UbusAttr::Status, 6);
+            env.push_i32(UbusAttr::Status, 0);
+            env.push_bytes_id(UbusAttr::Status as u8, invalid);
+            let frame = Frame::to_peer(MsgType::Status, 9, 7, env.finish());
+            assert_eq!(crate::envelope::read_status(&frame.payload).unwrap(), 0);
+            assert!(matches!(
+                InboundMsg::parse(&frame).unwrap(),
+                InboundMsg::Status { status: 0, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn typed_invoke_preserves_valid_object_and_method_before_invalid_duplicates() {
+        for invalid_id in [&[][..], &[8], &[0, 0, 0, 8, 0]] {
+            let mut env = EnvBuilder::new();
+            env.push_u32(UbusAttr::ObjId, 6);
+            env.push_u32(UbusAttr::ObjId, 7);
+            env.push_bytes_id(UbusAttr::ObjId as u8, invalid_id);
+            env.push_str(UbusAttr::Method, "old");
+            env.push_str(UbusAttr::Method, "known");
+            env.push_bytes_id(UbusAttr::Method as u8, b"unterminated");
+            let frame = Frame::to_peer(MsgType::Invoke, 9, 7, env.finish());
+            match InboundMsg::parse(&frame).unwrap() {
+                InboundMsg::Invoke { obj_id, method, .. } => {
+                    assert_eq!(obj_id.get(), 7);
+                    assert_eq!(method, "known");
+                }
+                other => panic!("expected INVOKE, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn typed_data_preserves_valid_object_before_invalid_duplicate() {
+        let mut env = EnvBuilder::new();
+        env.push_u32(UbusAttr::ObjId, 7);
+        env.push_bytes_id(UbusAttr::ObjId as u8, &[0, 0, 0, 8, 0]);
+        let frame = Frame::to_peer(MsgType::Data, 9, 7, env.finish());
+        assert!(matches!(
+            InboundMsg::parse(&frame).unwrap(),
+            InboundMsg::Data {
+                obj_id: Some(7),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn typed_status_rejects_invalid_width_without_valid_value() {
+        let mut env = EnvBuilder::new();
+        env.push_bytes_id(UbusAttr::Status as u8, &[0, 0, 0, 0, 0]);
+        let frame = Frame::to_peer(MsgType::Status, 9, 7, env.finish());
+        assert!(matches!(
+            InboundMsg::parse(&frame),
+            Err(UbusError::Malformed("STATUS frame without Status attr"))
+        ));
     }
 
     #[test]
