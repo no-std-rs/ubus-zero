@@ -228,16 +228,21 @@ fn dispatch_add_object(
             }
         },
     };
-    // Last-writer-wins re-registration: scrub the displaced obj-id
-    // from its old owner's `owned` list and from any subscriber lists
-    // keyed at it, so disconnect reaping doesn't chase a stale id and
-    // NOTIFY fan-out can't leak to a list that outlived the object.
-    if let Some((prev_id, prev_owner)) = replaced {
-        if let Some(prev_peer) = peers.get_mut(prev_owner) {
-            prev_peer.remove_owned(prev_id);
-        }
-        subs.purge_peer(prev_owner, &[prev_id], &[]);
-    }
+    // Replacement retires every route tied to the displaced object, just
+    // like explicit removal. Its registry entry was already dropped by insert.
+    let retired = if let Some((prev_id, prev_owner)) = replaced {
+        retire_object_routes(
+            prev_id,
+            prev_owner,
+            named_path.as_deref(),
+            peers,
+            objects,
+            subs,
+            events,
+        )
+    } else {
+        Vec::new()
+    };
     // Mirror onto the peer's own owned-list so the disconnect reaper
     // doesn't have to scan every registered object to find this peer's.
     if let Some(peer) = peers.get_mut(src_peer) {
@@ -254,6 +259,7 @@ fn dispatch_add_object(
         obj_id,
         signature_attr.and_then(|_| objects.type_of(obj_id).map(|t| t.id())),
     );
+    out.extend(retired);
     // A named registration broadcasts `ubus.object.add` to matching
     // listeners (anonymous objects are silent — pathless, LOOKUP-hidden).
     if let Some(path) = named_path {
@@ -299,23 +305,49 @@ fn dispatch_remove_object(
     // `ubus.object.remove` broadcast can carry it.
     let named_path = objects.named_path(obj_id).map(str::to_string);
     objects.remove(obj_id);
+    // Same two-frame shape as ADD_OBJECT: DATA(OBJID) then STATUS(0).
+    let mut out = add_or_remove_reply(src_peer, frame, obj_id, obj_type);
+    out.extend(retire_object_routes(
+        obj_id,
+        src_peer,
+        named_path.as_deref(),
+        peers,
+        objects,
+        subs,
+        events,
+    ));
+    out
+}
+
+/// Retire routes after either explicit removal or path replacement has
+/// removed the object from the registry. Surviving sibling objects keep
+/// their subscriptions and event registrations.
+fn retire_object_routes(
+    obj_id: ObjectId,
+    owner: PeerId,
+    named_path: Option<&str>,
+    peers: &mut PeerTable,
+    objects: &ObjectRegistry,
+    subs: &mut SubscriberRegistry,
+    events: &mut EventRegistry,
+) -> Vec<Action> {
     // Upstream `ubusd_free_object()` walks `obj->target_list` first:
     // every subscription where *this* object is the subscriber is torn
     // down, and each publisher left with no subscribers gets an
     // `Active=0` notify. The registry is keyed by target, so the peer's
     // own `subs` mirror is what narrows the search.
     let subscribed_to = peers
-        .get(src_peer)
+        .get(owner)
         .map(|p| p.subs_snapshot())
         .unwrap_or_default();
-    let (detached, emptied) = subs.remove_subscriber_object(src_peer, obj_id, &subscribed_to);
+    let (detached, emptied) = subs.remove_subscriber_object(owner, obj_id, &subscribed_to);
     let dead_subscribers = subs.remove_object(obj_id);
     let unsubscribe_actions = unsubscribe_for_dead_objects(peers, &[(obj_id, dead_subscribers)]);
     // Targeted purge: the only obj_id whose subscriber-list could
     // be affected is this one, and every subscription *via this object*
     // was already dropped above, so an empty `subscribed_to` suffices.
-    subs.purge_peer(src_peer, &[obj_id], &[]);
-    if let Some(peer) = peers.get_mut(src_peer) {
+    subs.purge_peer(owner, &[obj_id], &[]);
+    if let Some(peer) = peers.get_mut(owner) {
         peer.remove_owned(obj_id);
         // The mirror is a set of targets, not of subscriptions: only
         // forget a target once no sibling subscriber object still holds
@@ -324,20 +356,17 @@ fn dispatch_remove_object(
             if subs
                 .subscribers_of(*target)
                 .iter()
-                .all(|s| s.peer_id != src_peer)
+                .all(|s| s.peer_id != owner)
             {
                 peer.remove_sub(*target);
             }
         }
     }
-    let active_zero = active_zero_for_purged_subscriptions(peers, objects, &emptied);
+    let mut out = active_zero_for_purged_subscriptions(peers, objects, &emptied);
     // Upstream frees the object's `event_source` list in
     // `ubusd_event_cleanup_object()` — before the `ubus.object.remove`
     // broadcast, so the removed listener never sees its own removal.
     events.remove_object(obj_id);
-    // Same two-frame shape as ADD_OBJECT: DATA(OBJID) then STATUS(0).
-    let mut out = add_or_remove_reply(src_peer, frame, obj_id, obj_type);
-    out.extend(active_zero);
     out.extend(unsubscribe_actions);
     // A named removal broadcasts `ubus.object.remove` to listeners.
     if let Some(path) = named_path {
@@ -345,8 +374,8 @@ fn dispatch_remove_object(
             events,
             "ubus.object.remove",
             obj_id,
-            &path,
-            src_peer,
+            path,
+            owner,
         ));
     }
     out
@@ -3931,6 +3960,200 @@ mod tests {
             "the removed object's subscription must be gone"
         );
         assert_eq!(peers.get(subscriber).unwrap().sub_count(), 0);
+    }
+
+    #[test]
+    fn replacement_removes_retired_event_listener_and_orders_lifecycle_events() {
+        let mut peers = PeerTable::new();
+        let mut objs = ObjectRegistry::new();
+        let mut subs = SubscriberRegistry::new();
+        let mut events = EventRegistry::new();
+        let mut monitors = MonitorRegistry::new();
+        let owner = install_peer(&mut peers);
+        let replacement = install_peer(&mut peers);
+        let (retired, _) = objs.insert("example.replace".into(), owner, None).unwrap();
+        let sibling = objs.insert_anonymous(owner).unwrap();
+        peers.get_mut(owner).unwrap().add_owned(retired);
+        peers.get_mut(owner).unwrap().add_owned(sibling);
+        events.register(String::new(), true, owner, retired);
+        events.register("example.".into(), true, owner, sibling);
+        let (watcher, _) = install_listener(
+            &mut peers,
+            &mut objs,
+            &mut events,
+            &mut subs,
+            1,
+            "ubus.object.*",
+        );
+
+        let actions = super::dispatch_without_acl(
+            &add_object_frame(2, "example.replace"),
+            replacement,
+            &mut peers,
+            &mut objs,
+            &mut subs,
+            &mut events,
+            &mut monitors,
+        );
+        let current = objs.lookup_exact("example.replace").unwrap();
+        assert_ne!(current, retired);
+        assert_eq!(objs.owner_of(retired), None);
+        assert!(!peers.get(owner).unwrap().owns(retired));
+        assert!(peers.get(replacement).unwrap().owns(current));
+        assert!(actions
+            .iter()
+            .all(|action| !matches!(action, Action::SendTo { peer_id, .. } if *peer_id == owner)));
+        let lifecycle: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::SendTo { peer_id, frame, .. } if *peer_id == watcher => {
+                    let method = find(&frame.payload, UbusAttr::Method)?.as_str()?;
+                    let data = find(&frame.payload, UbusAttr::Data)?;
+                    let id = blobmsg_lookup(data.payload, "id")?.as_i32()? as u32;
+                    Some((method, id))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lifecycle,
+            vec![
+                ("ubus.object.remove", retired.get()),
+                ("ubus.object.add", current.get())
+            ]
+        );
+        assert_eq!(
+            events.matching_sorted("example.tick", None),
+            vec![(owner, sibling)]
+        );
+        let deliveries = super::dispatch_without_acl(
+            &event_send_frame(3, "example.tick", 1),
+            replacement,
+            &mut peers,
+            &mut objs,
+            &mut subs,
+            &mut events,
+            &mut monitors,
+        );
+        let delivered: Vec<_> = deliveries
+            .iter()
+            .filter_map(|action| match action {
+                Action::SendTo { peer_id, frame, .. } if frame.hdr.ty == MsgType::Invoke => {
+                    Some((*peer_id, find(&frame.payload, UbusAttr::ObjId)?.as_u32()?))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delivered, vec![(owner, sibling.get())]);
+    }
+
+    #[test]
+    fn replacement_detaches_subscriber_object_preserving_sibling_subscriptions() {
+        for same_owner in [false, true] {
+            for keep_sibling in [false, true] {
+                let mut peers = PeerTable::new();
+                let mut objs = ObjectRegistry::new();
+                let mut subs = SubscriberRegistry::new();
+                let publisher = install_peer(&mut peers);
+                let owner = install_peer(&mut peers);
+                let replacement = if same_owner {
+                    owner
+                } else {
+                    install_peer(&mut peers)
+                };
+                let (target, _) = objs
+                    .insert("example.publisher".into(), publisher, None)
+                    .unwrap();
+                let (retired, _) = objs.insert("example.replace".into(), owner, None).unwrap();
+                peers.get_mut(owner).unwrap().add_owned(retired);
+                subs.add(target, owner, retired);
+                peers.get_mut(owner).unwrap().add_sub(target);
+                let sibling = objs.insert_anonymous(owner).unwrap();
+                peers.get_mut(owner).unwrap().add_owned(sibling);
+                if keep_sibling {
+                    subs.add(target, owner, sibling);
+                }
+
+                let actions = dispatch(
+                    &add_object_frame(2, "example.replace"),
+                    replacement,
+                    &mut peers,
+                    &mut objs,
+                    &mut subs,
+                );
+                let expected = if keep_sibling {
+                    vec![Subscription {
+                        peer_id: owner,
+                        obj_id: sibling,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(subs.subscribers_of(target), expected);
+                assert_eq!(
+                    peers.get(owner).unwrap().is_subscribed_to(target),
+                    keep_sibling
+                );
+                let inactive: Vec<_> = actions
+                    .iter()
+                    .filter_map(|action| match action {
+                        Action::SendTo { peer_id, frame, .. }
+                            if *peer_id == publisher && frame.hdr.ty == MsgType::Notify =>
+                        {
+                            assert_eq!(
+                                find(&frame.payload, UbusAttr::ObjId)?.as_u32(),
+                                Some(target.get())
+                            );
+                            Some(find(&frame.payload, UbusAttr::Active)?.payload)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(inactive.len(), usize::from(!keep_sibling));
+                if !keep_sibling {
+                    assert_eq!(inactive[0], &[0]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_notifies_subscribers_of_the_retired_target() {
+        let mut peers = PeerTable::new();
+        let mut objs = ObjectRegistry::new();
+        let mut subs = SubscriberRegistry::new();
+        let owner = install_peer(&mut peers);
+        let replacement = install_peer(&mut peers);
+        let subscriber = install_peer(&mut peers);
+        let (retired, _) = objs.insert("example.replace".into(), owner, None).unwrap();
+        peers.get_mut(owner).unwrap().add_owned(retired);
+        let subscriber_obj = objs.insert_anonymous(subscriber).unwrap();
+        subs.add(retired, subscriber, subscriber_obj);
+        peers.get_mut(subscriber).unwrap().add_sub(retired);
+        let actions = dispatch(
+            &add_object_frame(2, "example.replace"),
+            replacement,
+            &mut peers,
+            &mut objs,
+            &mut subs,
+        );
+        assert!(subs.subscribers_of(retired).is_empty());
+        assert!(!peers.get(subscriber).unwrap().is_subscribed_to(retired));
+        let removed: Vec<_> = actions
+            .iter()
+            .filter_map(|action| match action {
+                Action::SendTo { peer_id, frame, .. }
+                    if *peer_id == subscriber && frame.hdr.ty == MsgType::Unsubscribe =>
+                {
+                    Some((
+                        find(&frame.payload, UbusAttr::ObjId)?.as_u32()?,
+                        find(&frame.payload, UbusAttr::Target)?.as_u32()?,
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, vec![(subscriber_obj.get(), retired.get())]);
     }
 
     /// libubus allows several `ubus_subscriber` objects on one context,
