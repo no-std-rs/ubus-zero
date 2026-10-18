@@ -67,7 +67,9 @@ ubus-client -s /tmp/ubus.sock call example.echo echo '{"message":"hello"}'
 ```
 
 Each handler has the configured request timeout. Failed handlers return an ubus
-error. The provider runs until stopped, or `-n COUNT` requests have completed.
+error. Replies that exceed ubus's message limit after encoding also return an
+error, and the provider stays available. It runs until stopped, or `-n COUNT`
+requests have completed.
 
 ## Exit codes and data types
 

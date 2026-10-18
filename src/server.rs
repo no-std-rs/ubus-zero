@@ -14,13 +14,15 @@ use crate::error::UbusError;
 use crate::msg::{InboundMsg, OutboundMsg};
 use crate::transport::Transport;
 use crate::wire::{
-    MsgType, ObjId, PeerId, IDLE_WAIT_BUDGET, UBUS_STATUS_INVALID_ARGUMENT,
+    Frame, MsgType, ObjId, PeerId, IDLE_WAIT_BUDGET, MAX_MSG_LEN, UBUS_STATUS_INVALID_ARGUMENT,
     UBUS_STATUS_METHOD_NOT_FOUND, UBUS_STATUS_UNKNOWN_ERROR,
 };
 
 /// Receives the *contents* of the INVOKE's outer TABLE wrapper so the
 /// handler can `lookup(args, "key")` directly. Returns the reply
-/// TABLE — use [`BlobMsgTable::build`] to construct it.
+/// TABLE — use [`BlobMsgTable::build`] to construct it. Replies exceeding the
+/// complete DATA envelope's wire limit are reported as UNKNOWN_ERROR (9)
+/// without sending DATA, and the connection remains usable.
 pub type MethodHandler = Box<dyn FnMut(&[u8]) -> Result<BlobMsgTable, UbusError> + 'static>;
 
 pub struct Method {
@@ -74,8 +76,8 @@ pub enum DispatchOutcome {
     Idle,
     /// INVOKE dispatched successfully; reply already sent.
     Handled,
-    /// Handler returned an error; UNKNOWN_ERROR (9) already sent. Inner error
-    /// is the handler's error so callers can record it.
+    /// Handler failed or returned an oversized reply; UNKNOWN_ERROR (9)
+    /// already sent. Inner error records the cause.
     HandlerErr(UbusError),
     /// Frame was an INVOKE but malformed (no Method attr, corrupt
     /// envelope, etc.); INVALID_ARGUMENT (2) already sent.
@@ -316,7 +318,16 @@ impl<T: Transport> UbusConnection<T> {
         };
         match (handler.handler)(args) {
             Ok(reply) => {
-                self.send_data(seq, peer, &reply)?;
+                // Avoid encoding/copying a body that is already too large,
+                // then check the actual envelope including every header.
+                if reply.contents().len() > MAX_MSG_LEN {
+                    return self.oversized_reply(seq, peer);
+                }
+                let frame = self.data_reply_frame(seq, peer, &reply)?;
+                if frame.payload.len() > MAX_MSG_LEN {
+                    return self.oversized_reply(seq, peer);
+                }
+                self.transport.send(&frame)?;
                 self.send_status(seq, peer, 0)?;
                 Ok(DispatchOutcome::Handled)
             }
@@ -327,19 +338,29 @@ impl<T: Transport> UbusConnection<T> {
         }
     }
 
-    fn send_data(&mut self, seq: u16, peer: u32, reply: &BlobMsgTable) -> Result<(), UbusError> {
+    fn oversized_reply(&mut self, seq: u16, peer: u32) -> Result<DispatchOutcome, UbusError> {
+        self.send_status(seq, peer, UBUS_STATUS_UNKNOWN_ERROR)?;
+        Ok(DispatchOutcome::HandlerErr(UbusError::Malformed(
+            "handler reply exceeds maximum message length",
+        )))
+    }
+
+    fn data_reply_frame(
+        &self,
+        seq: u16,
+        peer: u32,
+        reply: &BlobMsgTable,
+    ) -> Result<Frame, UbusError> {
         let peer = PeerId::new(peer).ok_or(UbusError::Malformed(
             "INVOKE caller peer-id is zero (broker would silently drop reply)",
         ))?;
         let obj_id = ObjId::new(self.object_id).ok_or(UbusError::NotRegistered)?;
-        self.transport.send(
-            &OutboundMsg::DataReply {
-                peer,
-                obj_id: Some(obj_id),
-                data: reply,
-            }
-            .into_frame(seq),
-        )
+        Ok(OutboundMsg::DataReply {
+            peer,
+            obj_id: Some(obj_id),
+            data: reply,
+        }
+        .into_frame(seq))
     }
 
     fn send_status(&mut self, seq: u16, peer: u32, status: i32) -> Result<(), UbusError> {
@@ -517,6 +538,65 @@ mod tests {
         assert_eq!(s, Some(0));
         let oid = find(&status.payload, UbusAttr::ObjId).and_then(|a| a.as_u32());
         assert_eq!(oid, Some(7), "STATUS must carry the responder's ObjId");
+    }
+
+    #[test]
+    fn oversized_provider_replies_send_only_error_and_allow_the_next_call() {
+        let empty = BlobMsgTable::build(|b| b.put_str(Some("value"), ""));
+        let overhead = OutboundMsg::DataReply {
+            peer: PeerId::new(7).unwrap(),
+            obj_id: Some(ObjId::new(7).unwrap()),
+            data: &empty,
+        }
+        .into_frame(1)
+        .payload
+        .len();
+        // Exercise the exact limit, an oversized envelope with an otherwise
+        // fitting body, and an oversized body rejected before encoding.
+        for extra in [0, 4, 64] {
+            let text = "x".repeat(MAX_MSG_LEN - overhead + extra);
+            let reply = BlobMsgTable::build(|b| b.put_str(Some("value"), &text));
+            let mut reply = Some(reply);
+            let object = UbusObject::new("example")
+                .method("large", move |_| Ok(reply.take().unwrap()))
+                .method("small", |_| Ok(BlobMsgTable::empty()));
+            let (transport, mut peer) = MockTransport::pair();
+            let mut server = server_with_obj(transport, object);
+            peer.send(&invoke_frame("large", None)).unwrap();
+            let outcome = server.poll_one().unwrap();
+            let expected_status = if extra == 0 {
+                assert!(matches!(outcome, DispatchOutcome::Handled));
+                let frame = peer.recv().unwrap().expect("maximum-sized DATA");
+                assert_eq!(frame.hdr.ty, MsgType::Data);
+                assert_eq!(frame.payload.len(), MAX_MSG_LEN);
+                0
+            } else {
+                assert!(matches!(
+                    outcome,
+                    DispatchOutcome::HandlerErr(UbusError::Malformed(
+                        "handler reply exceeds maximum message length"
+                    ))
+                ));
+                UBUS_STATUS_UNKNOWN_ERROR
+            };
+            let status = peer.recv().unwrap().expect("reply status");
+            assert_eq!(status.hdr.ty, MsgType::Status);
+            assert_eq!(
+                crate::envelope::read_status(&status.payload).unwrap(),
+                expected_status
+            );
+            assert!(peer.recv().unwrap().is_none());
+            assert_eq!(server.object_id(), 7);
+
+            peer.send(&invoke_frame("small", None)).unwrap();
+            assert!(matches!(
+                server.poll_one().unwrap(),
+                DispatchOutcome::Handled
+            ));
+            assert_eq!(peer.recv().unwrap().unwrap().hdr.ty, MsgType::Data);
+            let status = peer.recv().unwrap().unwrap();
+            assert_eq!(crate::envelope::read_status(&status.payload).unwrap(), 0);
+        }
     }
 
     #[test]
