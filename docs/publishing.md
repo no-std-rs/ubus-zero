@@ -58,6 +58,10 @@ a new version.
 The default-branch [Runnerless program](../.runnerless-ci.ts) uses
 [.ci-toolkit.yml](../.ci-toolkit.yml) to propose version/changelog changes in a
 release PR. Merging the release PR creates its tag and release through the App.
+Successful main CI completions also retry finalization and proposal through the
+same trusted operations, allowing a delayed push delivery to recover. PR, tag,
+failed and unrelated workflow runs do not enter that recovery path. The shared
+recipe reports both operations through its existing completion handler.
 
 The release event starts [the asset build](../.github/workflows/publish-release.yml).
 It checks that the event revision and checkout match the tag, validates the

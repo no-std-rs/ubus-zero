@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/config.test.mjs",
+    "test": "node --test tests/config.test.mjs ../scripts/runnerless-program.test.mjs",
     "test:browser": "playwright test",
     "build": "esbuild src/installer.js --bundle --format=esm --outfile=dist/installer.js"
   },

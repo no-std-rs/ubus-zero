@@ -1,5 +1,5 @@
 import {
-  workflow, configuration, event, repo, packages, checks, jobs, reviews,
+  workflow, configuration, event, repo, packages, checks, jobs, reviews, releases,
   OperationRef, OperationRequest, RegistryPublishRequest, WriteResult,
 } from "runnerless/v1";
 
@@ -36,6 +36,18 @@ export function run(): void {
         && value.get("value").get("failed").json == "false",
         "crates.io publication: " + value.get("status").string() + " " + value.get("value").get("error").string());
     }
+    return;
+  }
+  // A completed main build can recover a delayed push delivery. Reuse the
+  // recipe's operation refs so its completion handler reports the outcome.
+  if (name == "workflow_run" && details.get("action").string() == "completed"
+    && details.get("workflowPath").string() == ".github/workflows/ci.yml"
+    && details.get("conclusion").string() == "success"
+    && details.get("pullNumber").isNull()
+    && details.get("headRef").string() != ""
+    && details.get("headRef").string() == details.get("baseRef").string()) {
+    const finalize = releases.finalize(new OperationRequest("release-finalize"));
+    releases.propose(new OperationRequest("release-propose").after(finalize));
     return;
   }
   if (name != "workflow_run"
