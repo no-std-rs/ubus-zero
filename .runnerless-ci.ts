@@ -6,6 +6,7 @@ import {
 const program = workflow().releasePlease();
 
 export function configure(): void {
+  configuration.titlePolicy();
   program.configure();
   configuration.workflow("crate-publishing", ["workflow_run", "runnerless_completion"]);
   configuration.workflow("codex-review", [

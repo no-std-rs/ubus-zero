@@ -36,7 +36,10 @@ function execute(details, version = '0.4.1', releasePublished = true) {
   };
   vm.runInNewContext(source + '\nconfigure(); run();', {
     workflow: () => ({ releasePlease() { return this; }, configure() {}, run() {} }),
-    configuration: { workflow: (id, events) => declarations.push({ id, events: [...events] }) },
+    configuration: {
+      titlePolicy() {},
+      workflow: (id, events) => declarations.push({ id, events: [...events] }),
+    },
     event: { details: () => new Json(details) },
     releases: {
       finalize: request => stage('finalize', request),
