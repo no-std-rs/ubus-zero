@@ -40,7 +40,7 @@ jobs:
           python3 -c 'import json; assert not json.load(open("dist/firmware/latest.json"))["dirty"]'
           cd dist/firmware
           sha256sum --check SHA256SUMS
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: npm
@@ -59,7 +59,7 @@ jobs:
           npx playwright install --with-deps chromium
           npm run test:browser
       - name: Upload files for Runnerless
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: router-display-firmware
           path: dist/firmware/*
@@ -86,7 +86,7 @@ jobs:
     steps:
       - name: Deploy GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
