@@ -41,9 +41,12 @@ extern "C" fn on_signal(sig: libc::c_int) {
         libc::SIGHUP => b'H',
         _ => return,
     };
-    // SAFETY: `__errno_location` and `write(2)` are async-signal-safe. The
+    // SAFETY: errno access and `write(2)` are async-signal-safe. The
     // pipe fd is set before handlers are installed and remains open to exit.
     unsafe {
+        #[cfg(target_os = "android")]
+        let errno = libc::__errno();
+        #[cfg(not(target_os = "android"))]
         let errno = libc::__errno_location();
         let saved_errno = *errno;
         let fd = WAKE_WRITE_FD.load(Ordering::Relaxed);

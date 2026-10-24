@@ -1538,7 +1538,7 @@ fn user_name(uid: libc::uid_t) -> Option<String> {
     c_string(pwd.pw_name)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(target_os = "linux")]
 fn group_name(gid: libc::gid_t) -> Option<String> {
     let mut grp = std::mem::MaybeUninit::<libc::group>::uninit();
     let mut result = std::ptr::null_mut();
@@ -1557,6 +1557,18 @@ fn group_name(gid: libc::gid_t) -> Option<String> {
     }
     let grp = unsafe { grp.assume_init() };
     c_string(grp.gr_name)
+}
+
+#[cfg(target_os = "android")]
+fn group_name(gid: libc::gid_t) -> Option<String> {
+    // Bionic's getgrgid_r requires API 24. Its older getgrgid uses thread-local
+    // storage; copy the name before another group lookup on this thread.
+    // https://android.googlesource.com/platform/bionic/+/master/libc/bionic/grp_pwd.cpp
+    let group = unsafe { libc::getgrgid(gid) };
+    if group.is_null() {
+        return None;
+    }
+    c_string(unsafe { (*group).gr_name })
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
