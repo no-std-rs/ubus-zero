@@ -56,10 +56,10 @@ spin      = { version = "0.12", default-features = false, features = ["mutex", "
 serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }
 portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"], optional = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 rustix = { version = "1.1", default-features = false, optional = true }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dev-dependencies]
 libc = "0.2"
 
 [dev-dependencies]

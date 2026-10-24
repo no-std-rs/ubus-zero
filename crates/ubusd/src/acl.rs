@@ -628,6 +628,7 @@ pub(crate) fn parse_file(bytes: &[u8]) -> Result<Vec<AclEntry>, AclError> {
 
 /// Reentrant NSS reads preserve numeric ACL identity across aliases and avoid
 /// a second name lookup during each authorization check.
+#[cfg(not(target_os = "android"))]
 fn resolve_name(name: &str, group: bool) -> Option<u32> {
     let name = CString::new(name).ok()?;
     let mut buf = vec![0u8; 16 * 1024];
@@ -677,6 +678,24 @@ fn resolve_name(name: &str, group: bool) -> Option<u32> {
             return id;
         }
         buf.resize(buf.len().checked_mul(2)?, 0);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn resolve_name(name: &str, group: bool) -> Option<u32> {
+    let name = CString::new(name).ok()?;
+    // Bionic keeps these entries in thread-local storage. Copy the numeric ID
+    // immediately, without requiring the API-24 getgrnam_r symbol.
+    unsafe {
+        if group {
+            libc::getgrnam(name.as_ptr())
+                .as_ref()
+                .map(|entry| entry.gr_gid)
+        } else {
+            libc::getpwnam(name.as_ptr())
+                .as_ref()
+                .map(|entry| entry.pw_uid)
+        }
     }
 }
 

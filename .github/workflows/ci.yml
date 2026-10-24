@@ -64,6 +64,30 @@ jobs:
           cargo package -p ubus-zero --list --allow-dirty
           python3 scripts/package-registry-uploads.py dist/registry
 
+  android-min-api:
+    name: Android API 21 broker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NDK_VERSION: 28.2.13676358
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain and Android target
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android
+      - name: Install pinned Android NDK
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION"'
+      - name: Link the broker against API 21
+        run: |
+          compiler="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          export CC_aarch64_linux_android="$compiler"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$compiler"
+          cargo build --locked -p ubusd --bin ubusd --target aarch64-linux-android
+
   esp32c3-example:
     name: no_std ESP32-C3 display
     runs-on: ubuntu-latest

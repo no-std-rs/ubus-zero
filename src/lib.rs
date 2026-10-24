@@ -31,7 +31,10 @@ pub mod wire;
 
 #[cfg(feature = "json")]
 pub mod json;
-#[cfg(all(any(feature = "unix", feature = "signal"), target_os = "linux"))]
+#[cfg(all(
+    any(feature = "unix", feature = "signal"),
+    any(target_os = "linux", target_os = "android")
+))]
 pub mod unix;
 
 #[cfg(feature = "alloc")]
@@ -46,7 +49,7 @@ pub use server::{DispatchOutcome, Method, MethodHandler, UbusObject};
 pub use transport::Transport;
 pub use wire::{Header, MsgType};
 
-#[cfg(all(feature = "signal", target_os = "linux"))]
+#[cfg(all(feature = "signal", any(target_os = "linux", target_os = "android")))]
 pub mod signal;
 
 pub type Result<T> = core::result::Result<T, UbusError>;
