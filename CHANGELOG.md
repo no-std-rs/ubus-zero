@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.1...ubus-zero-v0.4.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* **android:** enable Unix transport and broker credentials ([#46](https://github.com/no-std-rs/ubus-zero/issues/46)) ([bdad926](https://github.com/no-std-rs/ubus-zero/commit/bdad92627a3e7ca720d4c085c85384b32b1d3820))
+
 All notable changes to `ubus-zero` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
