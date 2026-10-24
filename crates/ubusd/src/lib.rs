@@ -9,7 +9,7 @@ pub mod acl;
 pub mod broker;
 mod net;
 pub mod peer;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod poller;
 pub mod registry;
 pub mod reply;

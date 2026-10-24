@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Enable the Unix transport, signal helpers, broker polling and peer credentials
+  on Android using the existing Linux implementation.
+
 ## [0.4.1](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.0...ubus-zero-v0.4.1) (2026-10-18)
 
 

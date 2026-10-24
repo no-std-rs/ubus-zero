@@ -19,7 +19,7 @@ use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
 use rustix::event::{poll, PollFd};
 use rustix::event::{PollFlags, Timespec};
 use rustix::fd::{AsFd, AsRawFd, OwnedFd};
@@ -171,9 +171,9 @@ pub struct Broker {
     pending_close: HashSet<PeerId>,
     /// Reusable scratch for `poll_once`. Cleared and refilled each
     /// tick so the steady-state allocation count is zero.
-    #[cfg(any(test, not(target_os = "linux")))]
+    #[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
     live_ids_buf: Vec<PeerId>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     poller: crate::poller::Poller,
     tx_ready: HashSet<PeerId>,
     peer_revents_buf: Vec<(PeerId, PollFlags)>,
@@ -224,7 +224,7 @@ impl Broker {
                 config.socket_path,
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         let poller =
             crate::poller::Poller::new(&fd).map_err(|e| BrokerError::op("epoll_create", e))?;
         let mut broker = Self {
@@ -240,9 +240,9 @@ impl Broker {
             wake_pipe: None,
             shutdown: false,
             pending_close: HashSet::new(),
-            #[cfg(any(test, not(target_os = "linux")))]
+            #[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
             live_ids_buf: Vec::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             poller,
             tx_ready: HashSet::new(),
             peer_revents_buf: Vec::new(),
@@ -269,7 +269,7 @@ impl Broker {
             log::warn!("ubusd: wake pipe O_NONBLOCK failed: {e:?}; leaving pipe unset");
             return;
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if let Err(error) = self.poller.add_wake(&fd) {
                 log::warn!("ubusd: register wake pipe failed: {error:?}");
@@ -362,7 +362,7 @@ impl Broker {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn wait_ready(&mut self, timeout_ms: i32) -> Result<(PollFlags, Option<PollFlags>), Errno> {
         self.poller.wait(
             poll_timeout(timeout_ms).as_ref(),
@@ -370,12 +370,12 @@ impl Broker {
         )
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     fn wait_ready(&mut self, timeout_ms: i32) -> Result<(PollFlags, Option<PollFlags>), Errno> {
         self.wait_poll(timeout_ms)
     }
 
-    #[cfg(any(test, not(target_os = "linux")))]
+    #[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
     fn wait_poll(&mut self, timeout_ms: i32) -> Result<(PollFlags, Option<PollFlags>), Errno> {
         self.peers.live_ids_into(&mut self.live_ids_buf);
         let listen_revents;
@@ -427,7 +427,7 @@ impl Broker {
     }
 
     fn sync_write_interest(&mut self, id: PeerId) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(peer) = self.peers.get_mut(id) {
             let pending = peer.has_pending_tx();
             if pending != peer.write_interest {
@@ -441,7 +441,7 @@ impl Broker {
                 peer.write_interest = pending;
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let _ = id;
     }
 
@@ -518,7 +518,7 @@ impl Broker {
                         log::debug!("ubusd: refusing client with unresolvable credentials");
                         continue;
                     }
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "android"))]
                     let (uid, gid, user, group, extra_gids) = match credentials {
                         PeerCredentials::Resolved {
                             uid,
@@ -529,7 +529,7 @@ impl Broker {
                         } => (Some(uid), Some(gid), Some(user), Some(group), extra_gids),
                         PeerCredentials::ResolutionFailed => (None, None, None, None, Vec::new()),
                     };
-                    #[cfg(not(target_os = "linux"))]
+                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
                     let (uid, gid, user, group, extra_gids) = {
                         let _ = credentials;
                         (None, None, None, None, Vec::new())
@@ -548,7 +548,7 @@ impl Broker {
                     );
                     match self.peers.insert(peer) {
                         Ok((id, _)) => {
-                            #[cfg(target_os = "linux")]
+                            #[cfg(any(target_os = "linux", target_os = "android"))]
                             if let Some(fd) = self.peers.get(id).and_then(|peer| peer.fd.as_ref()) {
                                 if let Err(error) = self.poller.add_peer(fd, id) {
                                     log::warn!(
@@ -1079,7 +1079,7 @@ impl Broker {
                 }
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         if let Some(fd) = self.peers.get(peer_id).and_then(|peer| peer.fd.as_ref()) {
             let _ = self.poller.remove(fd);
         }
@@ -1384,7 +1384,7 @@ fn read_into_buf_available(
 }
 
 enum PeerCredentials {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     Resolved {
         uid: u32,
         gid: u32,
@@ -1392,9 +1392,9 @@ enum PeerCredentials {
         group: String,
         extra_gids: Vec<u32>,
     },
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     ResolutionFailed,
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     NotApplicable,
 }
 
@@ -1403,14 +1403,14 @@ enum PeerCredentials {
 /// The override only exists in testing builds, but an explicit boolean keeps
 /// this policy independently unit-testable without feature-gating the tests.
 fn accept_peer_credentials(credentials: &PeerCredentials, has_peer_uid_override: bool) -> bool {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         match credentials {
             PeerCredentials::Resolved { .. } => true,
             PeerCredentials::ResolutionFailed => has_peer_uid_override,
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = (credentials, has_peer_uid_override);
         true
@@ -1425,7 +1425,7 @@ fn accept_peer_credentials(credentials: &PeerCredentials, has_peer_uid_override:
 /// a raw-syscall credential read would bypass the shim and make the
 /// two brokers observe different users under test.
 fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let Some((uid, gid, pid)) = socket_peer_ids(fd) else {
             return PeerCredentials::ResolutionFailed;
@@ -1444,14 +1444,14 @@ fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
             extra_gids: supplementary_gids(pid),
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = fd;
         PeerCredentials::NotApplicable
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn socket_peer_ids(fd: &OwnedFd) -> Option<(libc::uid_t, libc::gid_t, libc::pid_t)> {
     let mut cred = std::mem::MaybeUninit::<libc::ucred>::uninit();
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -1474,7 +1474,7 @@ fn socket_peer_ids(fd: &OwnedFd) -> Option<(libc::uid_t, libc::gid_t, libc::pid_
 /// Upstream reads the peer's supplementary groups from its proc status at
 /// accept time, retaining at most 64 groups. Keep libc file I/O so isolated
 /// compatibility children can substitute this one process-local fixture.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn supplementary_gids(pid: libc::pid_t) -> Vec<u32> {
     let path = std::ffi::CString::new(format!("/proc/{pid}/status")).expect("numeric proc path");
     let file = unsafe { libc::fopen(path.as_ptr(), c"r".as_ptr()) };
@@ -1517,7 +1517,7 @@ fn supplementary_gids(pid: libc::pid_t) -> Vec<u32> {
     groups
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn user_name(uid: libc::uid_t) -> Option<String> {
     let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
     let mut result = std::ptr::null_mut();
@@ -1538,7 +1538,7 @@ fn user_name(uid: libc::uid_t) -> Option<String> {
     c_string(pwd.pw_name)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn group_name(gid: libc::gid_t) -> Option<String> {
     let mut grp = std::mem::MaybeUninit::<libc::group>::uninit();
     let mut result = std::ptr::null_mut();
@@ -1559,7 +1559,7 @@ fn group_name(gid: libc::gid_t) -> Option<String> {
     c_string(grp.gr_name)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn nss_buf_size(name: libc::c_int) -> usize {
     let n = unsafe { libc::sysconf(name) };
     if n > 0 {
@@ -1569,7 +1569,7 @@ fn nss_buf_size(name: libc::c_int) -> usize {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn c_string(ptr: *const libc::c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -1658,7 +1658,7 @@ mod tests {
             .insert(Peer::new(fd, Some(0), None, None))
             .unwrap()
             .0;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         broker
             .poller
             .add_peer(broker.peers.get(id).unwrap().fd.as_ref().unwrap(), id)
@@ -1886,7 +1886,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn linux_resolved_credentials_are_accepted() {
         let credentials = PeerCredentials::Resolved {
@@ -1900,7 +1900,7 @@ mod tests {
         assert!(accept_peer_credentials(&credentials, false));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn linux_unresolvable_credentials_without_override_are_refused() {
         assert!(!accept_peer_credentials(
@@ -1909,7 +1909,7 @@ mod tests {
         ));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn linux_unresolvable_credentials_with_testing_override_are_accepted() {
         assert!(accept_peer_credentials(

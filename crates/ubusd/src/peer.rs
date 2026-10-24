@@ -41,7 +41,7 @@ pub struct Peer {
     /// Immutable accepted credentials, shared by dispatch without per-frame
     /// string/group allocation. Only test setup mutates through Arc::make_mut.
     pub(crate) credentials: Arc<Cred>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub(crate) write_interest: bool,
 
     pub(crate) rx_buf: Vec<u8>,
@@ -97,7 +97,7 @@ impl Peer {
         Self {
             fd: Some(fd),
             credentials: Arc::new(credentials),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             write_interest: false,
             rx_buf: Vec::new(),
             tx_buf: VecDeque::new(),
@@ -120,7 +120,7 @@ impl Peer {
         Self {
             fd: None,
             credentials: Arc::new(Cred::default()),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             write_interest: false,
             rx_buf: Vec::new(),
             tx_buf: VecDeque::new(),
