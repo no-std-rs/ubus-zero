@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.2...ubus-zero-v0.5.0) (2026-10-25)
+
+
+### Features
+
+* support macOS for the Unix transport and ubusd ([#49](https://github.com/no-std-rs/ubus-zero/issues/49)) ([fed01d2](https://github.com/no-std-rs/ubus-zero/commit/fed01d2ae5f99b59aefda8ad1b73dcc646e22cf9))
+
 ## [0.4.2](https://github.com/no-std-rs/ubus-zero/compare/ubus-zero-v0.4.1...ubus-zero-v0.4.2) (2026-10-24)
 
 
