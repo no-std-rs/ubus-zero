@@ -1,4 +1,4 @@
-//! Linux Unix-stream transport adapted from Cellctl's ubus adapter.
+//! Unix-stream transport for Linux, Android and macOS, adapted from Cellctl's ubus adapter.
 //!
 //! Enable `unix` to use this adapter with `no_std + alloc`. Reads are buffered
 //! and nonblocking; writes and optional operation deadlines use monotonic time.
@@ -9,7 +9,7 @@ use rustix::{
     event::{poll, PollFd, PollFlags, Timespec},
     fd::OwnedFd,
     io::Errno,
-    net::{RecvFlags, SendFlags, SocketAddrUnix, SocketFlags, SocketType},
+    net::{RecvFlags, SocketAddrUnix, SocketType},
     time::{clock_gettime, ClockId},
 };
 
@@ -17,6 +17,29 @@ use crate::{
     wire::{Codec, Frame, MAX_MSG_LEN},
     Transport, UbusError,
 };
+
+/// A close-on-exec, nonblocking Unix stream socket. macOS cannot set both
+/// atomically, so it applies them right after creating the socket.
+fn stream_socket() -> Result<OwnedFd, Errno> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        rustix::net::socket_with(
+            rustix::net::AddressFamily::UNIX,
+            SocketType::STREAM,
+            rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+            None,
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::io::{fcntl_getfd, fcntl_setfd, ioctl_fionbio, FdFlags};
+        let fd = rustix::net::socket(rustix::net::AddressFamily::UNIX, SocketType::STREAM, None)?;
+        fcntl_setfd(&fd, fcntl_getfd(&fd)? | FdFlags::CLOEXEC)?;
+        ioctl_fionbio(&fd, true)?;
+        rustix::net::sockopt::set_socket_nosigpipe(&fd, true)?;
+        Ok(fd)
+    }
+}
 
 /// An error after a partial send makes this transport unusable. Drop it and
 /// reconnect: another frame cannot safely follow the unfinished wire frame.
@@ -29,13 +52,7 @@ pub struct UnixUbusTransport {
 
 impl UnixUbusTransport {
     pub fn connect(path: &str) -> Result<Self, UbusError> {
-        let fd = rustix::net::socket_with(
-            rustix::net::AddressFamily::UNIX,
-            SocketType::STREAM,
-            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
-            None,
-        )
-        .map_err(|e| io_error("socket", e))?;
+        let fd = stream_socket().map_err(|e| io_error("socket", e))?;
         let address = SocketAddrUnix::new(path).map_err(|e| io_error("address", e))?;
         rustix::net::connect(&fd, &address).map_err(|e| io_error("connect", e))?;
         Ok(Self {
@@ -90,7 +107,7 @@ impl Transport for UnixUbusTransport {
         let result = (|| {
             while sent < bytes.len() {
                 self.check_deadline()?;
-                match rustix::net::send(&self.fd, &bytes[sent..], SendFlags::NOSIGNAL) {
+                match rustix::net::send(&self.fd, &bytes[sent..], super::NO_SIGPIPE) {
                     Ok(0) => return Err(UbusError::Closed),
                     Ok(n) => sent += n,
                     Err(Errno::INTR) => continue,

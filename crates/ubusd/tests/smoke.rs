@@ -763,20 +763,20 @@ fn event_payload(frame: &Frame) -> &[u8] {
 }
 
 fn expected_process_user_group() -> (Option<String>, Option<String>) {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         (
             user_name(unsafe { libc::getuid() }),
             group_name(unsafe { libc::getgid() }),
         )
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         (None, None)
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn user_name(uid: libc::uid_t) -> Option<String> {
     let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
     let mut result = std::ptr::null_mut();
@@ -797,7 +797,7 @@ fn user_name(uid: libc::uid_t) -> Option<String> {
     c_string(pwd.pw_name)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn group_name(gid: libc::gid_t) -> Option<String> {
     let mut grp = std::mem::MaybeUninit::<libc::group>::uninit();
     let mut result = std::ptr::null_mut();
@@ -818,7 +818,7 @@ fn group_name(gid: libc::gid_t) -> Option<String> {
     c_string(grp.gr_name)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn nss_buf_size(name: libc::c_int) -> usize {
     let n = unsafe { libc::sysconf(name) };
     if n > 0 {
@@ -828,7 +828,7 @@ fn nss_buf_size(name: libc::c_int) -> usize {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn c_string(ptr: *const libc::c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -1035,10 +1035,11 @@ fn slow_monitor_evicted_when_tx_buf_caps() {
             MsgType::Status
         );
     }
-    monitor
-        .s
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
+    // macOS rejects socket options once the broker has closed the evicted
+    // monitor; the reads below observe that EOF either way.
+    if let Err(error) = monitor.s.set_read_timeout(Some(Duration::from_millis(500))) {
+        assert!(cfg!(target_os = "macos") && error.kind() == std::io::ErrorKind::InvalidInput);
+    }
     let mut buf = [0u8; 4096];
     let deadline = Instant::now() + RECV_TIMEOUT;
     let mut eof = false;

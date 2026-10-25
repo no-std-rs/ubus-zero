@@ -46,7 +46,9 @@ extern "C" fn on_signal(sig: libc::c_int) {
     unsafe {
         #[cfg(target_os = "android")]
         let errno = libc::__errno();
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "macos")]
+        let errno = libc::__error();
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
         let errno = libc::__errno_location();
         let saved_errno = *errno;
         let fd = WAKE_WRITE_FD.load(Ordering::Relaxed);
@@ -80,11 +82,43 @@ fn install_signal_handler(sig: libc::c_int) -> io::Result<()> {
     Ok(())
 }
 
+/// A close-on-exec, nonblocking pipe. macOS has no pipe2; the flags are set
+/// before any signal handler is installed, so no exec can observe the gap.
+///
+/// # Safety
+/// `fds` receives two new descriptors that the caller must take ownership of.
+unsafe fn wake_pipe(fds: &mut [libc::c_int; 2]) -> libc::c_int {
+    #[cfg(not(target_os = "macos"))]
+    return libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK);
+    #[cfg(target_os = "macos")]
+    {
+        if libc::pipe(fds.as_mut_ptr()) != 0 {
+            return -1;
+        }
+        for fd in *fds {
+            if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) != 0
+                || libc::fcntl(
+                    fd,
+                    libc::F_SETFL,
+                    libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+                ) != 0
+            {
+                let error = io::Error::last_os_error();
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+                *libc::__error() = error.raw_os_error().unwrap_or(libc::EIO);
+                return -1;
+            }
+        }
+        0
+    }
+}
+
 fn setup_wake_pipe() -> Option<OwnedFd> {
     let mut fds = [-1; 2];
     // SAFETY: `fds` is a valid two-element output array. On success both
     // descriptors are owned here and immediately wrapped in `OwnedFd`.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
+    if unsafe { wake_pipe(&mut fds) } != 0 {
         eprintln!(
             "ubusd: create signal wake pipe: {}",
             io::Error::last_os_error()

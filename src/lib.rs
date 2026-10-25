@@ -33,7 +33,7 @@ pub mod wire;
 pub mod json;
 #[cfg(all(
     any(feature = "unix", feature = "signal"),
-    any(target_os = "linux", target_os = "android")
+    any(target_os = "linux", target_os = "android", target_os = "macos")
 ))]
 pub mod unix;
 

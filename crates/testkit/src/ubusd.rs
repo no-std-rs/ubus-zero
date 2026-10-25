@@ -206,7 +206,12 @@ impl UbusdHarness {
         // over the process-global UBUS_ZERO_FAULT the fault-check
         // runner sets, so one test can wedge one connection without
         // perturbing the rest of a parallel suite.
+        // Fault injection uses LD_PRELOAD shims, built only on Linux.
         let fault = fault_override.or_else(fault_profile_from_env);
+        #[cfg(not(target_os = "linux"))]
+        if !fixtures_viable_without_shims(extra_args, extra_env, fault.is_some()) {
+            return Ok(None);
+        }
 
         let mut cmd = Command::new(binary);
         for f in socket_flag {
@@ -427,6 +432,26 @@ fn parse_positive_usize(key: &str, raw: &str) -> usize {
 
 /// LD_PRELOAD shim set for a plain broker run: just the peercred spoofer
 /// (Linux only; `struct ucred` is Linux-specific).
+/// Whether a broker fixture can run without the Linux-only LD_PRELOAD shims.
+/// Every scenario expects either root peer credentials (the uid spoofer), a
+/// spoofed ACL/NSS identity, or injected faults. Without the shims the broker
+/// sees the real peer, so only a root test process gets the expected
+/// behavior, and ACL, NSS and fault scenarios cannot run at all. Callers
+/// treat a non-viable fixture like a missing broker and skip.
+#[cfg(not(target_os = "linux"))]
+fn fixtures_viable_without_shims(
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+    fault: bool,
+) -> bool {
+    !fault
+        && !extra_args.contains(&"-A")
+        && !extra_env
+            .iter()
+            .any(|(key, _)| key.starts_with("UBUS_TESTKIT_"))
+        && rustix::process::geteuid().is_root()
+}
+
 fn uid_spoof_shims() -> Vec<&'static str> {
     #[cfg(target_os = "linux")]
     {
@@ -458,6 +483,7 @@ fn acl_shims() -> Vec<&'static str> {
 /// `UBUS_TESTKIT_NSS_*` key present. Existing scenarios pass no such
 /// keys, so their LD_PRELOAD strings (and recorded golden transcripts)
 /// are structurally unchanged.
+#[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
 fn with_nss_shim(mut shims: Vec<&'static str>, env: &[(&str, &str)]) -> Vec<&'static str> {
     if env
         .iter()
@@ -885,6 +911,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn with_nss_shim_appends_for_users() {
         let shims = with_nss_shim(
             vec!["first"],
@@ -896,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn with_nss_shim_appends_for_fail_uids() {
         let shims = with_nss_shim(vec!["first"], &[("UBUS_TESTKIT_NSS_FAIL_UIDS", "4242")]);
         assert_eq!(shims.len(), 2);

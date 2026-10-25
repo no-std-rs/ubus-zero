@@ -286,10 +286,8 @@ fn load_one(path: &Path) -> Result<Vec<AclEntry>, AclError> {
         .filter_map(|mut entry| {
             let (name, is_group) = if let Some(user) = entry.user.as_deref() {
                 (user, false)
-            } else if let Some(group) = entry.group.as_deref() {
-                (group, true)
             } else {
-                return None;
+                (entry.group.as_deref()?, true)
             };
             let Some(id) = resolve_name(name, is_group) else {
                 log::warn!(
@@ -940,6 +938,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn encode_priv_table_byte_parity_with_reference() {
         if !ubus_testkit::json::AVAILABLE_JSON {
             ubus_testkit::skip::or_skip(
