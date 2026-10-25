@@ -1,4 +1,4 @@
-//! Linux socket adapters. [`StreamSender`] sends caller-owned encoded frames
+//! Unix socket adapters for Linux, Android and macOS. [`StreamSender`] sends caller-owned encoded frames
 //! without an allocator, preserving offsets over partial writes and EAGAIN.
 //! The allocating client transport is available with the `unix` feature.
 
@@ -9,6 +9,13 @@ pub use allocated::UnixUbusTransport;
 
 use crate::wire::{Codec, HEADER_SIZE};
 use rustix::{fd::BorrowedFd, io::Errno, net::SendFlags};
+
+/// Sends never raise SIGPIPE. macOS has no MSG_NOSIGNAL; there sockets carry
+/// SO_NOSIGPIPE instead (see [`StreamSender::new`]).
+#[cfg(not(target_os = "macos"))]
+pub(crate) const NO_SIGPIPE: SendFlags = SendFlags::NOSIGNAL;
+#[cfg(target_os = "macos")]
+pub(crate) const NO_SIGPIPE: SendFlags = SendFlags::empty();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartError {
@@ -34,7 +41,11 @@ pub struct StreamSender<'fd> {
 }
 
 impl<'fd> StreamSender<'fd> {
+    /// On macOS this sets SO_NOSIGPIPE on the caller's socket, since sends there
+    /// cannot suppress SIGPIPE per call.
     pub fn new(fd: BorrowedFd<'fd>) -> Self {
+        #[cfg(target_os = "macos")]
+        let _ = rustix::net::sockopt::set_socket_nosigpipe(fd, true);
         Self {
             fd,
             poisoned: false,
@@ -80,7 +91,7 @@ impl PendingSend<'_, '_, '_> {
         match rustix::net::send(
             self.sender.fd,
             &self.bytes[self.sent..],
-            SendFlags::DONTWAIT | SendFlags::NOSIGNAL,
+            SendFlags::DONTWAIT | NO_SIGPIPE,
         )? {
             0 => Err(Errno::PIPE),
             n => {

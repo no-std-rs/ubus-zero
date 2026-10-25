@@ -21,6 +21,13 @@ static REQUESTED_BYTES: AtomicUsize = AtomicUsize::new(0);
 static LARGE_CALLS: AtomicUsize = AtomicUsize::new(0);
 static LARGE_THRESHOLD: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+// macOS cannot create socket pairs close-on-exec atomically; this
+// measurement never execs, so it creates them without the flag there.
+#[cfg(not(target_os = "macos"))]
+const SOCKET_FLAGS: rustix::net::SocketFlags = rustix::net::SocketFlags::CLOEXEC;
+#[cfg(target_os = "macos")]
+const SOCKET_FLAGS: rustix::net::SocketFlags = rustix::net::SocketFlags::empty();
+
 fn record_allocation(size: usize) {
     ALLOCATION_CALLS.fetch_add(1, Ordering::Relaxed);
     REQUESTED_BYTES.fetch_add(size, Ordering::Relaxed);
@@ -84,7 +91,7 @@ fn notify_footprint(payload_bytes: usize, subscriber_count: usize) -> serde_json
         let (socket, other) = rustix::net::socketpair(
             rustix::net::AddressFamily::UNIX,
             rustix::net::SocketType::STREAM,
-            rustix::net::SocketFlags::CLOEXEC,
+            SOCKET_FLAGS,
             None,
         )
         .unwrap();
@@ -204,7 +211,7 @@ fn main() {
         let (socket, other) = rustix::net::socketpair(
             rustix::net::AddressFamily::UNIX,
             rustix::net::SocketType::STREAM,
-            rustix::net::SocketFlags::CLOEXEC,
+            SOCKET_FLAGS,
             None,
         )
         .unwrap();

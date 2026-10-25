@@ -206,6 +206,8 @@ impl UbusdHarness {
         // over the process-global UBUS_ZERO_FAULT the fault-check
         // runner sets, so one test can wedge one connection without
         // perturbing the rest of a parallel suite.
+        // Fault injection uses LD_PRELOAD shims, built only on Linux.
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let fault = fault_override.or_else(fault_profile_from_env);
 
         let mut cmd = Command::new(binary);
@@ -458,6 +460,7 @@ fn acl_shims() -> Vec<&'static str> {
 /// `UBUS_TESTKIT_NSS_*` key present. Existing scenarios pass no such
 /// keys, so their LD_PRELOAD strings (and recorded golden transcripts)
 /// are structurally unchanged.
+#[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
 fn with_nss_shim(mut shims: Vec<&'static str>, env: &[(&str, &str)]) -> Vec<&'static str> {
     if env
         .iter()
@@ -885,6 +888,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn with_nss_shim_appends_for_users() {
         let shims = with_nss_shim(
             vec!["first"],
@@ -896,6 +900,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn with_nss_shim_appends_for_fail_uids() {
         let shims = with_nss_shim(vec!["first"], &[("UBUS_TESTKIT_NSS_FAIL_UIDS", "4242")]);
         assert_eq!(shims.len(), 2);

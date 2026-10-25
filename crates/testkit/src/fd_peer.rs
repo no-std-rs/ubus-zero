@@ -15,8 +15,34 @@ use rustix::net::{
 use rustix::{
     fd::{AsRawFd as _, BorrowedFd, OwnedFd},
     io::{IoSlice, IoSliceMut},
-    pipe::{pipe_with, PipeFlags},
+    pipe,
 };
+
+/// macOS has no MSG_CMSG_CLOEXEC or pipe2; mark descriptors right after creation.
+#[cfg(not(target_os = "macos"))]
+const RECV_CLOEXEC: RecvFlags = RecvFlags::CMSG_CLOEXEC;
+#[cfg(target_os = "macos")]
+const RECV_CLOEXEC: RecvFlags = RecvFlags::empty();
+
+/// Darwin reports untruncated `cmsg_len` and limits control data to
+/// MCLBYTES, so receive into a buffer that cannot be truncated there.
+#[cfg(not(target_os = "macos"))]
+const RIGHTS_CONTROL: usize = rustix::cmsg_space!(ScmRights(1));
+#[cfg(target_os = "macos")]
+const RIGHTS_CONTROL: usize = 2048;
+
+fn cloexec(fd: &OwnedFd) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::io::{fcntl_getfd, fcntl_setfd, FdFlags};
+        let flags = fcntl_getfd(fd).map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
+        fcntl_setfd(fd, flags | FdFlags::CLOEXEC)
+            .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = fd;
+    Ok(())
+}
 use ubus::error::UbusError;
 use ubus::wire::{Codec, Frame};
 
@@ -126,19 +152,19 @@ impl FdPeer {
         let mut iov = [IoSliceMut::new(
             &mut scratch[..limit.min(RECV_SCRATCH_BYTES)],
         )];
-        let mut control_storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control_storage = [MaybeUninit::uninit(); RIGHTS_CONTROL];
         let mut control = RecvAncillaryBuffer::new(&mut control_storage);
         // SAFETY: `self.stream` owns this raw fd and remains alive throughout
         // the recvmsg call.
         let socket = unsafe { BorrowedFd::borrow_raw(self.stream.as_raw_fd()) };
-        let received =
-            rustix::net::recvmsg(socket, &mut iov, &mut control, RecvFlags::CMSG_CLOEXEC)
-                .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
+        let received = rustix::net::recvmsg(socket, &mut iov, &mut control, RECV_CLOEXEC)
+            .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
 
         let mut fd = None;
         for message in control.drain() {
             if let RecvAncillaryMessage::ScmRights(fds) = message {
                 for received in fds {
+                    cloexec(&received)?;
                     if fd.is_none() {
                         fd = Some(received);
                     }
@@ -190,7 +216,12 @@ impl FdPeer {
                     "UBUS frame deadline",
                 ));
             }
-            self.stream.set_read_timeout(Some(remaining))?;
+            match self.stream.set_read_timeout(Some(remaining)) {
+                // macOS rejects socket options once the peer has closed; the
+                // following receive reports that EOF or reset itself.
+                Err(e) if cfg!(target_os = "macos") && e.kind() == io::ErrorKind::InvalidInput => {}
+                result => result?,
+            }
             let limit = need - pending.bytes.len();
             let (read, fd) = match self.recv_bytes_with_fd(&mut pending.bytes, limit) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -224,7 +255,17 @@ impl FdPeer {
 
 /// Create the read and write ends of a pipe for SCM_RIGHTS round-trip tests.
 pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    pipe_with(PipeFlags::CLOEXEC).map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))
+    #[cfg(not(target_os = "macos"))]
+    return pipe::pipe_with(pipe::PipeFlags::CLOEXEC)
+        .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()));
+    #[cfg(target_os = "macos")]
+    {
+        let (read, write) =
+            pipe::pipe().map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
+        cloexec(&read)?;
+        cloexec(&write)?;
+        Ok((read, write))
+    }
 }
 
 #[cfg(test)]

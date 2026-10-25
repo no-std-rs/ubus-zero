@@ -1,5 +1,6 @@
 //! Differential parity for ubus-zero's blob-to-JSON renderer against the real
 //! `libblobmsg_json` implementation.
+#![cfg(target_os = "linux")]
 
 use std::fmt::Write;
 

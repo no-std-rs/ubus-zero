@@ -15,6 +15,7 @@
 //!    short-wrote.
 
 use std::collections::{HashSet, VecDeque};
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 use std::ffi::CStr;
 use std::io;
 use std::mem::MaybeUninit;
@@ -22,12 +23,18 @@ use std::mem::MaybeUninit;
 #[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
 use rustix::event::{poll, PollFd};
 use rustix::event::{PollFlags, Timespec};
-use rustix::fd::{AsFd, AsRawFd, OwnedFd};
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+use rustix::fd::AsRawFd;
+use rustix::fd::{AsFd, OwnedFd};
 use rustix::io::Errno;
 use rustix::io::{IoSlice, IoSliceMut};
+#[cfg(any(test, not(target_os = "macos")))]
+use rustix::net::RecvFlags;
+#[cfg(not(target_os = "macos"))]
+use rustix::net::ReturnFlags;
 use rustix::net::{
-    RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
-    SendAncillaryMessage, SendFlags, SocketAddrUnix,
+    RecvAncillaryBuffer, RecvAncillaryMessage, SendAncillaryBuffer, SendAncillaryMessage,
+    SendFlags, SocketAddrUnix,
 };
 
 use ubus::blobmsg::BlobMsgTable;
@@ -518,7 +525,7 @@ impl Broker {
                         log::debug!("ubusd: refusing client with unresolvable credentials");
                         continue;
                     }
-                    #[cfg(any(target_os = "linux", target_os = "android"))]
+                    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
                     let (uid, gid, user, group, extra_gids) = match credentials {
                         PeerCredentials::Resolved {
                             uid,
@@ -529,7 +536,11 @@ impl Broker {
                         } => (Some(uid), Some(gid), Some(user), Some(group), extra_gids),
                         PeerCredentials::ResolutionFailed => (None, None, None, None, Vec::new()),
                     };
-                    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                    #[cfg(not(any(
+                        target_os = "linux",
+                        target_os = "android",
+                        target_os = "macos"
+                    )))]
                     let (uid, gid, user, group, extra_gids) = {
                         let _ = credentials;
                         (None, None, None, None, Vec::new())
@@ -1187,7 +1198,7 @@ fn send_some_with_ancillary<F: rustix::fd::AsFd>(
     site: &'static str,
 ) -> SendOutcome {
     loop {
-        let mut control_storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control_storage = [MaybeUninit::uninit(); crate::net::RIGHTS_CONTROL];
         let mut control = SendAncillaryBuffer::new(&mut control_storage);
         let rights = rights_fd.map(|fd| [fd.as_fd()]);
         if let Some(rights) = rights.as_ref() {
@@ -1223,15 +1234,16 @@ fn tx_send_window(sent_abs: usize, chunk_len: usize, next_fd_abs: Option<usize>)
 /// Peek without consuming, returning the length only if every peeked byte is
 /// descriptor-free. SCM_RIGHTS received under MSG_PEEK are fresh duplicates:
 /// explicitly close all of them, including the visible part of a truncated cmsg.
+#[cfg(not(target_os = "macos"))]
 fn peek_descriptor_free_bytes(fd: &OwnedFd, bytes: &mut [u8]) -> Result<Option<usize>, Errno> {
     let mut iov = [IoSliceMut::new(bytes)];
-    let mut storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+    let mut storage = [MaybeUninit::uninit(); crate::net::RIGHTS_CONTROL];
     let mut control = RecvAncillaryBuffer::new(&mut storage);
     let received = rustix::net::recvmsg(
         fd,
         &mut iov,
         &mut control,
-        RecvFlags::PEEK | RecvFlags::CMSG_CLOEXEC,
+        RecvFlags::PEEK | crate::net::RECV_CLOEXEC,
     )?;
     let mut ancillary = received.flags.contains(ReturnFlags::CTRUNC);
     for message in control.drain() {
@@ -1243,6 +1255,35 @@ fn peek_descriptor_free_bytes(fd: &OwnedFd, bytes: &mut [u8]) -> Result<Option<u
         }
     }
     Ok((!ancillary).then_some(received.bytes))
+}
+
+/// Darwin copies pending control data for MSG_PEEK without installing
+/// descriptors, so it must never be parsed as SCM_RIGHTS. Only its presence
+/// matters: any control bytes mean the peeked range carries descriptors.
+#[cfg(target_os = "macos")]
+fn peek_descriptor_free_bytes(fd: &OwnedFd, bytes: &mut [u8]) -> Result<Option<usize>, Errno> {
+    let mut control = [0u8; crate::net::RIGHTS_CONTROL];
+    let mut iov = libc::iovec {
+        iov_base: bytes.as_mut_ptr().cast(),
+        iov_len: bytes.len(),
+    };
+    // SAFETY: msghdr is plain data; every pointer refers to a live local buffer.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = control.len() as libc::socklen_t;
+    // SAFETY: the buffers outlive the call and their lengths are exact.
+    let received = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, libc::MSG_PEEK) };
+    if received < 0 {
+        return Err(Errno::from_raw_os_error(
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+        ));
+    }
+    let ancillary = msg.msg_controllen > 0 || msg.msg_flags & libc::MSG_CTRUNC != 0;
+    Ok((!ancillary).then_some(received as usize))
 }
 
 /// Locate the partial frame without consuming it. Only descriptor-bearing
@@ -1333,20 +1374,29 @@ fn read_into_buf_available(
             (remaining.min(scratch.len()), frame_abs, capture_fd)
         };
         let mut iov = [IoSliceMut::new(&mut scratch[..read_len])];
-        let mut control_storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control_storage = [MaybeUninit::uninit(); crate::net::RIGHTS_CONTROL];
         // Upstream reads the body without an ancillary buffer, and disables
-        // further fd reception once this frame already owns one. The kernel
-        // closes discarded descriptors in both cases.
-        let control_len = if capture_fd { control_storage.len() } else { 0 };
+        // further fd reception once this frame already owns one. Linux closes
+        // discarded descriptors at once; Darwin leaves them to its socket
+        // garbage collector, so receive and close them explicitly there.
+        let control_len = if capture_fd || cfg!(target_os = "macos") {
+            control_storage.len()
+        } else {
+            0
+        };
         let mut control = RecvAncillaryBuffer::new(&mut control_storage[..control_len]);
-        match rustix::net::recvmsg(fd, &mut iov, &mut control, RecvFlags::CMSG_CLOEXEC) {
+        match rustix::net::recvmsg(fd, &mut iov, &mut control, crate::net::RECV_CLOEXEC) {
             Ok(received) if received.bytes == 0 => return false,
             Ok(received) => {
                 let mut received_fd = None;
                 for message in control.drain() {
                     if let RecvAncillaryMessage::ScmRights(fds) = message {
                         for received_fd_candidate in fds {
-                            if received_fd.is_none() {
+                            if crate::net::mark_received(&received_fd_candidate).is_err() {
+                                // Close a descriptor that cannot be kept from exec.
+                                continue;
+                            }
+                            if capture_fd && received_fd.is_none() {
                                 received_fd = Some(received_fd_candidate);
                             }
                         }
@@ -1384,7 +1434,7 @@ fn read_into_buf_available(
 }
 
 enum PeerCredentials {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     Resolved {
         uid: u32,
         gid: u32,
@@ -1392,9 +1442,9 @@ enum PeerCredentials {
         group: String,
         extra_gids: Vec<u32>,
     },
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     ResolutionFailed,
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     NotApplicable,
 }
 
@@ -1403,14 +1453,14 @@ enum PeerCredentials {
 /// The override only exists in testing builds, but an explicit boolean keeps
 /// this policy independently unit-testable without feature-gating the tests.
 fn accept_peer_credentials(credentials: &PeerCredentials, has_peer_uid_override: bool) -> bool {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
         match credentials {
             PeerCredentials::Resolved { .. } => true,
             PeerCredentials::ResolutionFailed => has_peer_uid_override,
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         let _ = (credentials, has_peer_uid_override);
         true
@@ -1425,9 +1475,9 @@ fn accept_peer_credentials(credentials: &PeerCredentials, has_peer_uid_override:
 /// a raw-syscall credential read would bypass the shim and make the
 /// two brokers observe different users under test.
 fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     {
-        let Some((uid, gid, pid)) = socket_peer_ids(fd) else {
+        let Some((uid, gid, extra_gids)) = peer_identity(fd) else {
             return PeerCredentials::ResolutionFailed;
         };
         let Some(user) = user_name(uid) else {
@@ -1441,14 +1491,50 @@ fn accepted_peer_cred(fd: &OwnedFd) -> PeerCredentials {
             gid,
             user,
             group,
-            extra_gids: supplementary_gids(pid),
+            extra_gids,
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         let _ = fd;
         PeerCredentials::NotApplicable
     }
+}
+
+/// Peer uid, gid and supplementary groups. Linux and Android use SO_PEERCRED
+/// and the peer's proc status, as upstream does.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_identity(fd: &OwnedFd) -> Option<(u32, u32, Vec<u32>)> {
+    let (uid, gid, pid) = socket_peer_ids(fd)?;
+    Some((uid, gid, supplementary_gids(pid)))
+}
+
+/// macOS reports the peer's uid and up to 16 groups through LOCAL_PEERCRED;
+/// the first group is the effective gid, the rest are supplementary.
+#[cfg(target_os = "macos")]
+fn peer_identity(fd: &OwnedFd) -> Option<(u32, u32, Vec<u32>)> {
+    let mut cred = std::mem::MaybeUninit::<libc::xucred>::uninit();
+    let mut len = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes at most `len` bytes into the xucred buffer.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERCRED,
+            cred.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 || len < std::mem::size_of::<libc::xucred>() as libc::socklen_t {
+        return None;
+    }
+    // SAFETY: getsockopt succeeded and filled the complete structure.
+    let cred = unsafe { cred.assume_init() };
+    if cred.cr_version != libc::XUCRED_VERSION || cred.cr_ngroups < 1 {
+        return None;
+    }
+    let groups = &cred.cr_groups[..(cred.cr_ngroups as usize).min(cred.cr_groups.len())];
+    Some((cred.cr_uid, groups[0], groups[1..].to_vec()))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1517,7 +1603,7 @@ fn supplementary_gids(pid: libc::pid_t) -> Vec<u32> {
     groups
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 fn user_name(uid: libc::uid_t) -> Option<String> {
     let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
     let mut result = std::ptr::null_mut();
@@ -1538,7 +1624,7 @@ fn user_name(uid: libc::uid_t) -> Option<String> {
     c_string(pwd.pw_name)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn group_name(gid: libc::gid_t) -> Option<String> {
     let mut grp = std::mem::MaybeUninit::<libc::group>::uninit();
     let mut result = std::ptr::null_mut();
@@ -1571,7 +1657,7 @@ fn group_name(gid: libc::gid_t) -> Option<String> {
     c_string(unsafe { (*group).gr_name })
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 fn nss_buf_size(name: libc::c_int) -> usize {
     let n = unsafe { libc::sysconf(name) };
     if n > 0 {
@@ -1581,7 +1667,7 @@ fn nss_buf_size(name: libc::c_int) -> usize {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 fn c_string(ptr: *const libc::c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
@@ -1648,6 +1734,19 @@ mod tests {
         PeerId::new(n).unwrap()
     }
 
+    /// Read bytes and close any SCM_RIGHTS that arrive with them. Linux
+    /// closes rights discarded by read(2) at once; Darwin defers to its socket
+    /// garbage collector, so tests receive and drop them explicitly.
+    fn read_dropping_rights(fd: &OwnedFd, bytes: &mut [u8]) -> usize {
+        let mut iov = [IoSliceMut::new(bytes)];
+        let mut storage = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+        let mut control = RecvAncillaryBuffer::new(&mut storage);
+        let received =
+            rustix::net::recvmsg(fd, &mut iov, &mut control, RecvFlags::empty()).expect("recvmsg");
+        control.drain().for_each(drop);
+        received.bytes
+    }
+
     fn memory_broker() -> Broker {
         let path = ubus_testkit::unique_socket_path("buffer-pool");
         Broker::bind(Config {
@@ -1658,13 +1757,7 @@ mod tests {
     }
 
     fn memory_peer(broker: &mut Broker) -> (PeerId, OwnedFd) {
-        let (fd, client) = rustix::net::socketpair(
-            rustix::net::AddressFamily::UNIX,
-            rustix::net::SocketType::STREAM,
-            rustix::net::SocketFlags::NONBLOCK | rustix::net::SocketFlags::CLOEXEC,
-            None,
-        )
-        .unwrap();
+        let (fd, client) = crate::net::test_socketpair(true);
         let id = broker
             .peers
             .insert(Peer::new(fd, Some(0), None, None))
@@ -1826,16 +1919,13 @@ mod tests {
         let (id, client) = memory_peer(&mut broker);
         let bytes = Codec::write_frame(&reply::hello_reply(0, id));
         for cycle in 1..=3 {
-            let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::NONBLOCK).unwrap();
+            let (read, write) = crate::net::test_pipe_nonblock();
             broker.enqueue_bytes_with_fd(id, &bytes, write);
             broker.drain_tx(id);
             let mut response = [0; 64];
-            assert_eq!(
-                rustix::io::read(&client, &mut response).unwrap(),
-                bytes.len()
-            );
+            assert_eq!(read_dropping_rights(&client, &mut response), bytes.len());
             assert_eq!(&response[..bytes.len()], bytes);
-            // read() discards SCM_RIGHTS; all write-end copies must close.
+            // Discarded SCM_RIGHTS must leave no write-end copy open.
             assert_eq!(rustix::io::read(&read, &mut [0; 1]).unwrap(), 0);
             let peer = broker.peers.get(id).unwrap();
             assert_eq!(peer.tx_buf.capacity(), 0);
@@ -1898,7 +1988,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn linux_resolved_credentials_are_accepted() {
         let credentials = PeerCredentials::Resolved {
@@ -1912,7 +2002,7 @@ mod tests {
         assert!(accept_peer_credentials(&credentials, false));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn linux_unresolvable_credentials_without_override_are_refused() {
         assert!(!accept_peer_credentials(
@@ -1921,7 +2011,7 @@ mod tests {
         ));
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn linux_unresolvable_credentials_with_testing_override_are_accepted() {
         assert!(accept_peer_credentials(
@@ -1964,19 +2054,12 @@ mod tx_send_window_tests {
 mod rx_frame_tests {
     use super::*;
     use rustix::fs::{fcntl_setfl, OFlags};
-    use rustix::net::{socketpair, AddressFamily, SocketFlags, SocketType};
     use ubus::envelope::{EnvBuilder, UbusAttr};
     use ubus::wire::MsgType;
     use ubus_testkit::pipe;
 
     fn sockets() -> (OwnedFd, OwnedFd) {
-        socketpair(
-            AddressFamily::UNIX,
-            SocketType::STREAM,
-            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
-            None,
-        )
-        .expect("socketpair")
+        crate::net::test_socketpair(true)
     }
 
     fn send_rights(socket: &OwnedFd, bytes: &[u8], descriptor: &OwnedFd, count: usize) {
@@ -2119,17 +2202,10 @@ mod rx_frame_tests {
 mod rx_peek_tests {
     use super::*;
     use rustix::fs::{fcntl_setfl, OFlags};
-    use rustix::net::{socketpair, AddressFamily, SocketFlags, SocketType};
     use ubus_testkit::pipe;
 
     fn sockets() -> (OwnedFd, OwnedFd) {
-        socketpair(
-            AddressFamily::UNIX,
-            SocketType::STREAM,
-            SocketFlags::CLOEXEC,
-            None,
-        )
-        .expect("socketpair")
+        crate::net::test_socketpair(false)
     }
 
     fn send_rights(socket: &OwnedFd, bytes: &[u8], descriptor: &OwnedFd, count: usize) {
