@@ -1680,10 +1680,9 @@ fn c_string(ptr: *const libc::c_char) -> Option<String> {
 
 /// On Linux, `MSG_NOSIGNAL` suppresses the per-write SIGPIPE delivery
 /// that would otherwise tear the daemon down when a peer disconnects
-/// mid-send. macOS lacks the flag — the standalone `main.rs` installs
-/// `SIG_IGN` for SIGPIPE at startup, and the EPIPE arm in `send_some`
-/// surfaces the disconnect as a clean close. Embedding hosts must
-/// install their own SIGPIPE policy.
+/// mid-send. macOS lacks the flag, so every accepted socket carries
+/// `SO_NOSIGPIPE` instead (see `net::accept_nonblock_cloexec`), and the
+/// EPIPE arm in `send_some` surfaces the disconnect as a clean close.
 #[cfg(not(target_os = "macos"))]
 fn send_flags() -> SendFlags {
     SendFlags::NOSIGNAL

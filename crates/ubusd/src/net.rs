@@ -32,7 +32,14 @@ pub(crate) fn accept_nonblock_cloexec<Fd: AsFd>(listener: Fd) -> Result<OwnedFd,
     #[cfg(target_os = "macos")]
     {
         let fd = rustix::net::accept(listener)?;
-        set_cloexec_nonblock(&fd)?;
+        // macOS has no MSG_NOSIGNAL, so the socket itself must suppress
+        // SIGPIPE: an embedding host may keep the default disposition.
+        // These failures concern this connection only (Darwin rejects socket
+        // options with EINVAL once the peer has closed), so report them as an
+        // aborted connection, which the broker drops before continuing.
+        set_cloexec_nonblock(&fd)
+            .and_then(|()| rustix::net::sockopt::set_socket_nosigpipe(&fd, true))
+            .map_err(|_| Errno::CONNABORTED)?;
         Ok(fd)
     }
 }
@@ -125,5 +132,27 @@ pub(crate) fn test_pipe_nonblock() -> (OwnedFd, OwnedFd) {
         rustix::io::ioctl_fionbio(&read, true).unwrap();
         rustix::io::ioctl_fionbio(&write, true).unwrap();
         (read, write)
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_sockets_suppress_sigpipe() {
+        let path = std::env::temp_dir().join(format!("ubusd-net-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let address = rustix::net::SocketAddrUnix::new(path.to_str().unwrap()).unwrap();
+        let listener = unix_stream_socket().unwrap();
+        rustix::net::bind(&listener, &address).unwrap();
+        rustix::net::listen(&listener, 1).unwrap();
+        let client = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::net::connect(&client, &address).unwrap();
+        let accepted = accept_nonblock_cloexec(&listener).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(rustix::net::sockopt::socket_nosigpipe(&accepted).unwrap());
+        let flags = rustix::io::fcntl_getfd(&accepted).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
     }
 }
